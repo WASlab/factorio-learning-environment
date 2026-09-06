@@ -26,6 +26,10 @@ class Nearest(Tool):
         except Exception as exc:
             raise RuntimeError(f"nearest({name}) failed: {exc}") from exc
 
+        if isinstance(response, str):
+            if "Could not find an entity called" in response:
+                raise LookupError(f"No {name} found within 500 tiles")
+            raise RuntimeError(f"nearest({name}) failed: {response}")
         if response is None or response == {}:
             if metaclass == ResourcePatch:
                 raise LookupError(

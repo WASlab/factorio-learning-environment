@@ -1,5 +1,5 @@
 from fle.env.entities import Position, Entity
-from fle.env import DirectionInternal
+from fle.env import DirectionInternal, Direction
 from fle.env.game_types import Prototype
 from fle.env.tools import Tool
 
@@ -26,6 +26,10 @@ class PlaceEntityNextTo(Tool):
         :example: place_entity_next_to(Prototype.WoodenChest, Position(x=0, y=0), direction=Direction.UP, spacing=1)
         :return: Entity placed
         """
+        if not isinstance(direction, (Direction, DirectionInternal)):
+            raise ValueError(
+                "direction must be a Direction member, such as Direction.RIGHT"
+            )
         try:
             name, metaclass = entity.value
 
