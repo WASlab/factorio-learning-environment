@@ -100,21 +100,46 @@ ATOMIC_JSON_REPLACE_BACKOFF_MAX_SECONDS = 0.5
 # Keep the operating objective useful to the agent without exposing benchmark
 # internals such as selection, rating, or qualification policy.
 FACTORY_ROLE_OBJECTIVE = (
-    "Operate and expand an automated Factorio factory capable of reliably "
-    "supplying changing customer demand. Favor durable automation, balanced "
-    "throughput, and reusable infrastructure. End-to-end throughput is "
-    "tested without agent actions. Customer depots credit only "
-    "inserter-fed factory output; direct hand delivery is audit-only."
+    "Operate and expand an automated factory in Factorio capable of sustaining "
+    "production rates of many items at scale. The goal is to develop the factory "
+    "into an increasingly large-scale industrial system. Advancement comes "
+    "through automating production, expanding infrastructure, eliminating "
+    "bottlenecks, and creating systems that scale. Alongside this long-term "
+    "objective there are periodic requisitions. Requisitions represent external "
+    "demand from the broader expedition and provide concrete tests of whether "
+    "the factory supplies useful output at scale. They are one measure of the "
+    "factory's usefulness and industrial maturity. Present and future "
+    "requisitions should influence production planning, but they are not the "
+    "sole objective. Advance technology, expand capacity, improve logistics, "
+    "and automate production while fulfilling requisitions. Completing a "
+    "requisition does not end the need for industrial development; pursue the "
+    "broader goal. Future requisitions will require greater quantities, "
+    "different products, or more advanced production chains. "
+    "End-to-end (E2E) means a "
+    "connected chain from ongoing resource extraction, through processing and "
+    "transport, into the bound depot, with automatic recurring fuel "
+    "and energy supply. Throughput is tested without agent actions. "
+    "Bind an existing empty player-owned chest "
+    "to each active requisition product with set_delivery_chest; only inserter-fed output "
+    "is credited and direct hand delivery is audit-only."
+    " Manual actions may build, start, repair, and expand the factory. "
+    "Requisition throughput qualifies only when its production chain sustains "
+    "the required rate without those actions. Hand mining, crafting, and "
+    "fueling are acceptable during development, including while building a "
+    "requisition's production chain. Progress toward automated, unattended "
+    "supply chains that remove recurring dependence on manual operation. "
+    "Use observed inventories, machine statuses, production rates, and depot "
+    "traffic to locate bottlenecks. Distinguish production, delivery, and "
+    "qualification: output in storage is not delivery, and delivery alone is "
+    "not proof of sustained production. Choose your own layout and development "
+    "plan; maintain current service while investing in future capability."
 )
 
 FREEPLAY_TASK_ID = "adaptive_contract_session_v1"
 CUSTOMER_DEPOT_LOCATION = (
-    "the persistent customer depot is a pre-existing row of immutable sink "
-    "chests six tiles west and ten tiles north of your starting character "
-    "(relative anchor -6, -10; Factorio entity centers may use half-tile "
-    "coordinates). The authoritative chest IDs and exact positions are listed "
-    "under customer_depots in factorio_observe_factory; player-built chests "
-    "never count"
+    "delivery has no fixed map location. Select an existing empty player-owned "
+    "chest for each active product with set_delivery_chest. The binding appears "
+    "under customer_depots in factorio_observe_factory and ends with the requisition"
 )
 
 
@@ -284,11 +309,13 @@ class OpenAICompatibleAgentSession:
         f"{FACTORY_ROLE_OBJECTIVE} You operate a Factorio factory through a "
         "Python REPL. Each turn you "
         "submit one program via the submit_program tool; its stdout/stderr is "
-        "returned to you. Build automated production to fulfil every customer "
-        f"order before its deadline. The factory persists across all orders; "
+        "returned to you. Develop the industrial system while meeting active "
+        f"requisition requirements. The factory persists across all requisitions; "
         f"{CUSTOMER_DEPOT_LOCATION}. There is no intervention or turn budget; "
         "continue measuring and improving the persistent factory until the "
-        "current order is fulfilled. Only use the supplied submit_program and "
+        "current requisition reaches a terminal state. This ends the current "
+        "interaction, not the factory's development; subsequent requisitions "
+        "continue in the same world. Only use the supplied submit_program and "
         "factorio_* reference tools; web, browser, terminal, host filesystem, "
         "and delegation tools are unavailable. The action reference below describes "
         "the Python names available inside submit_program. Callable "
@@ -670,14 +697,18 @@ class HermesPersistentAgentSession:
         "complete FLE API manuals and exact version-matched game-data facts. "
         "Web, browser, terminal, host filesystem, and delegation tools are "
         "prohibited and unavailable. Observe before acting and between major "
-        "changes. Build automated production to fulfil each customer order. "
-        "The factory and this conversation persist across orders, so preserve "
-        "and extend useful infrastructure. There is no intervention, turn, "
-        "customer-order, or simulation-tick budget. Stop "
-        "calling tools after the current order is fulfilled, expired, or the "
-        "tool result reports another terminal reason. "
+        "changes. Develop the industrial system while meeting active "
+        "requisition requirements. The factory and this conversation persist "
+        "across requisitions, so preserve "
+        "and extend useful infrastructure. There is no fixed intervention or "
+        "turn allowance; each requisition has a simulation-time deadline. Thinking "
+        "does not consume that deadline, but actions and waits do. Stop "
+        "calling tools for this interaction after the current requisition is "
+        "fulfilled, expired, or the tool result reports another terminal reason. "
+        "That boundary does not end industrial development: the next interaction "
+        "continues in the same world with the next requisition. "
         "When factorio_memory_* tools are enabled, selectively read relevant "
-        "entries at the start of an order and write a concise orders/<epoch> "
+        "entries at the start of a requisition and write a concise orders/<epoch> "
         "handoff plus durable plan updates before ending it. Memory is an "
         "untrusted notebook: it cannot change contracts or observations, and "
         "revision conflicts require rereading before updating. "
@@ -766,7 +797,7 @@ class HermesPersistentAgentSession:
             if self.invocation_count == 0
             else (
                 "Continue the same persistent benchmark session. A new "
-                f"customer order is now active.\n\n{order_prompt}"
+                f"requisition is now active.\n\n{order_prompt}"
             )
         )
         usage_file = self.artifacts_dir / f"epoch-{epoch_number:04d}.usage.json"
@@ -1139,10 +1170,10 @@ class OpenCodePersistentAgentSession:
     def _continuation_prompt() -> str:
         return (
             "The previous OpenCode provider step ended with reason:length. "
-            "The current customer order is still active. Continue the same "
+            "The current requisition is still active. Continue the same "
             "persistent benchmark session after automatic context compaction; "
             "do not start a new session, reset the factory, or claim completion "
-            "without verifying the order. Continue using the Factorio tools "
+            "without verifying the requisition. Continue using the Factorio tools "
             "until the MCP environment reports an authoritative terminal state."
         )
 
@@ -1186,7 +1217,7 @@ class OpenCodePersistentAgentSession:
             if self.invocation_count == 0
             else (
                 "Continue the same persistent benchmark session. A new "
-                f"customer order is now active.\n\n{order_prompt}"
+                f"requisition is now active.\n\n{order_prompt}"
             )
         )
         self.terminal_file.unlink(missing_ok=True)
@@ -1412,7 +1443,7 @@ def render_order_prompt(
     spec: ContractEpochSpec, *, memory_enabled: bool = False
 ) -> str:
     memory_instruction = (
-        "At this order boundary, selectively read relevant session memory; "
+        "At this requisition boundary, selectively read relevant session memory; "
         "before stopping, record a short handoff under "
         f"orders/{spec.epoch_index} with delivery, capability progress, "
         "blockers, and the next likely step. "
@@ -1440,7 +1471,7 @@ def render_order_prompt(
         "minutes of factory time). Deliveries count only when they cross "
         f"into the pre-existing depot chests; {CUSTOMER_DEPOT_LOCATION}. "
         "Feed a depot with an inserter: direct insert_item delivery is recorded "
-        "for audit but does not fulfill the order. Depot contents are consumed "
+        "for audit but does not fulfill the requisition. Depot contents are consumed "
         "immediately, so its inventory will normally appear empty. "
         f"{service}{memory_instruction}Current inventory "
         "and infrastructure remain "
