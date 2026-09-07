@@ -50,4 +50,11 @@ class GetPrototypeRecipe(Tool):
             for product in parsed_response["products"]
         ]
 
-        return Recipe(name=name, ingredients=ingredients, products=products)
+        return Recipe(
+            name=name,
+            ingredients=ingredients,
+            products=products,
+            energy=parsed_response["energy"],
+            category=parsed_response["category"],
+            enabled=parsed_response["enabled"],
+        )

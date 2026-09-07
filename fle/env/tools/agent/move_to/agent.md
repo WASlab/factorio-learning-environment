@@ -20,9 +20,12 @@ The function returns your final Position after moving.
 # Simple movement
 new_pos = move_to(Position(x=10, y=10))
 
-# Move to resource
+# Open resource tiles are reached exactly; occupied targets such as trees are approached
 coal_pos = nearest(Resource.Coal)
 move_to(coal_pos)
+
+# Interaction actions auto-approach, so explicit movement is normally unnecessary
+harvest_resource(coal_pos, quantity=10)
 ```
 
 ## Movement Patterns
@@ -30,7 +33,7 @@ move_to(coal_pos)
 ### 1. Resource Navigation
 
 ```python
-move_to(nearest(IronOre))
+move_to(nearest(Resource.IronOre))
 ```
 
 ### 2. Move before placing
@@ -47,3 +50,5 @@ chest = place_entity(Prototypw.WoodenChest, position = Position(x = 0, y = 0))
 1. "Cannot move"
    - Verify destination is reachable (i.e not water)
    - Ensure coordinates are valid
+   - Occupied targets resolve to the nearest walkable point in interaction range
+   - Use `stop_distance` to stop earlier, or call an interaction action directly

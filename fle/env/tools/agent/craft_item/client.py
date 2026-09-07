@@ -18,6 +18,8 @@ class CraftItem(Tool):
         :return: Number of items crafted
         """
 
+        if isinstance(quantity, bool) or not isinstance(quantity, int) or quantity <= 0:
+            raise ValueError("quantity must be a positive integer")
         if hasattr(entity, "value"):
             name, _ = entity.value
         else:
@@ -50,14 +52,23 @@ class CraftItem(Tool):
             sleep(real_world_sleep)
 
         if not self.game_state.instance.fast:
-            sleep(0.5)
-            attempt = 0
-            max_attempts = 10
-            while (
-                self.inspect_inventory()[entity] - count_in_inventory < quantity
-                and attempt < max_attempts
-            ):
-                sleep(0.5)
-                attempt += 1
+            # Compatibility action: wait for the native crafting queue rather
+            # than pretending recipe duration elapsed. New programs should use
+            # queue_craft so crafting can overlap movement and other options.
+            start_tick = int(
+                self.connection.rcon_client.send_command("/sc rcon.print(game.tick)")
+                or 0
+            )
+            timeout_tick = start_tick + 60 * 60 * 10
+            while self.inspect_inventory()[entity] - count_in_inventory < success:
+                now = int(
+                    self.connection.rcon_client.send_command(
+                        "/sc rcon.print(game.tick)"
+                    )
+                    or 0
+                )
+                if now >= timeout_tick:
+                    raise TimeoutError(f"Timed out crafting {quantity}x {name}")
+                sleep(0.05)
 
         return success

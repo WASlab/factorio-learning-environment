@@ -1,3 +1,4 @@
+import math
 from typing import Tuple, Union
 
 from fle.env.entities import Position, Entity
@@ -29,17 +30,26 @@ class Tool(Controller):
         return x, y
 
     def get_error_message(self, response):
-        try:
-            msg = (
-                response.split(":")[-1]
-                .replace('"', "")
-                .strip()
-                .replace("\\'", "")
-                .replace("'", "")
-            )
-            return msg
-        except Exception:
-            return response
+        # Colons separate useful diagnostics too (for example, a missing
+        # technology and its recipe). Never discard that causal context.
+        return response.strip() if isinstance(response, str) else response
+
+    def ensure_reachable(self, target, stop_distance: float = 5.5):
+        """Walk into interaction range in live mode without choosing a new target."""
+
+        if self.game_state.instance.fast:
+            return self.game_state.player_location
+        position = target.position if isinstance(target, Entity) else target
+        x, y = self.get_position(position)
+        current = self.game_state.player_location
+        if math.hypot(x - current.x, y - current.y) <= stop_distance:
+            return current
+        # Lazy import avoids a module cycle: MoveTo itself derives from Tool.
+        from fle.env.tools.agent.move_to.client import MoveTo
+
+        return MoveTo(self.connection, self.game_state)(
+            Position(x=x, y=y), stop_distance=stop_distance
+        )
 
     def load(self):
         # self.lua_script_manager.load_action_into_game(self.name)

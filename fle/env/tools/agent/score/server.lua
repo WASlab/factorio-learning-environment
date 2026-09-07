@@ -330,18 +330,6 @@ production_score.get_production_scores = function(_price_list)
   return scores
 end
 
-function dump(o)
-  if type(o) == 'table' then
-     local s = '{ '
-     for k,v in pairs(o) do
-        if type(k) ~= 'number' then k = '"'..k..'"' end
-        s = s .. '['..k..'] = ' .. dump(v) .. ','
-     end
-     return s .. '} '
-  else
-     return tostring(o)
-  end
-end
 
 -- Calculate the total value of harvested items (raw resources gathered manually or by drills)
 local function get_harvested_value(price_list)
@@ -389,15 +377,16 @@ end
 
 storage.goal = nil
 
-local scores = production_score.get_production_scores()
-if scores then
-    storage.initial_score = scores
+if game then
+    local scores = production_score.get_production_scores()
+    if scores then storage.initial_score = scores end
+    local price_list = production_score.generate_price_list()
+    storage.initial_harvested_value = get_harvested_value(price_list)
+    storage.initial_crafted_net_value = get_crafted_net_value(price_list)
 end
-
--- Store initial harvested and crafted values for delta calculation
-local price_list = production_score.generate_price_list()
-storage.initial_harvested_value = get_harvested_value(price_list)
-storage.initial_crafted_net_value = get_crafted_net_value(price_list)
+storage.initial_score = storage.initial_score or {player = 0}
+storage.initial_harvested_value = storage.initial_harvested_value or 0
+storage.initial_crafted_net_value = storage.initial_crafted_net_value or 0
 
 storage.actions.score = function()
     local price_list = production_score.generate_price_list()
@@ -430,7 +419,7 @@ storage.actions.score = function()
       --if goal_description ~= nil and #goal_description > 1 then
         --production_score["goal"] = goal_description[1]:gsub("-", "_")
       --end
-      return dump(prod_score)
+      return prod_score
     end
-    return dump(prod_score)
+    return prod_score
 end

@@ -330,25 +330,14 @@ production_score.get_production_scores = function(_price_list)
   return scores
 end
 
-function dump(o)
-  if type(o) == 'table' then
-     local s = '{ '
-     for k,v in pairs(o) do
-        if type(k) ~= 'number' then k = '"'..k..'"' end
-        s = s .. '['..k..'] = ' .. dump(v) .. ','
-     end
-     return s .. '} '
-  else
-     return tostring(o)
-  end
-end
 
 storage.goal = nil
 
-local scores = production_score.get_production_scores()
-if scores then
-    storage.initial_score = scores
+if game then
+    local scores = production_score.get_production_scores()
+    if scores then storage.initial_score = scores end
 end
+storage.initial_score = storage.initial_score or {player = 0}
 
 storage.actions.score = function()
     local prod_score = production_score.get_production_scores()
@@ -366,7 +355,7 @@ storage.actions.score = function()
       --if goal_description ~= nil and #goal_description > 1 then
         --production_score["goal"] = goal_description[1]:gsub("-", "_")
       --end
-      return dump(prod_score)
+      return prod_score
     end
-    return dump(prod_score)
+    return prod_score
 end

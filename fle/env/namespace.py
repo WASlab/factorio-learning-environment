@@ -217,7 +217,7 @@ class FactorioNamespace:
         """Raise if *name* would shadow a protected FLE name."""
         if self._protected_names and name in self._protected_names:
             raise NameError(
-                f"Cannot redefine '{name}' — it is a built-in FLE function/variable. "
+                f"Cannot redefine '{name}' â€” it is a built-in FLE function/variable. "
                 f"Choose a different name."
             )
 
@@ -389,7 +389,7 @@ class FactorioNamespace:
             for subnode_idx, subnode in enumerate(node.orelse):
                 node.orelse[subnode_idx] = self._change_print_to_log(subnode)
         elif isinstance(node, ast.FunctionDef):
-            # Don't rewrite print→log inside function bodies.
+            # Don't rewrite printâ†’log inside function bodies.
             # SerializableFunction.reconstruct() injects print=instance.log
             # into the function's globals, so print() calls inside agent-defined
             # functions are routed to the log automatically at call time.
@@ -422,6 +422,8 @@ class FactorioNamespace:
         Helper function to execute a single AST node
         Returns: True for normal execution, False or string for control flow changes
         """
+        if getattr(self, "_cancel_requested", False):
+            raise TimeoutError("Evaluation cancelled after exceeding its time limit")
 
         def process_annotation(annotation, eval_dict):
             """Process a type annotation node and return the evaluated type"""

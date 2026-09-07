@@ -1,112 +1,154 @@
 import math
 from time import sleep
+from typing import Iterable
 
 from fle.env.entities import Position
-from fle.env.instance import NONE
 from fle.env.game_types import Prototype
+from fle.env.instance import NONE
+from fle.env.lua_manager import LuaScriptManager
+from fle.env.tools import Tool
 from fle.env.tools.admin.get_path.client import GetPath
 from fle.env.tools.admin.request_path.client import RequestPath
-from fle.env.tools import Tool
-from fle.env.lua_manager import LuaScriptManager
 
 
 class MoveTo(Tool):
+    """Walk the character over live Factorio ticks."""
+
     def __init__(self, connection: LuaScriptManager, game_state):
         super().__init__(connection, game_state)
-        # self.observe = ObserveAll(connection, game_state)
         self.request_path = RequestPath(connection, game_state)
         self.get_path = GetPath(connection, game_state)
+        self.last_receipt: dict | None = None
 
     def __call__(
-        self, position: Position, laying: Prototype = None, leading: Prototype = None
+        self,
+        position: Position,
+        laying: Prototype = None,
+        leading: Prototype = None,
+        stop_distance: float = 0,
+        mode: str = "walk",
+        waypoints: Iterable[Position] | None = None,
+        interrupt_on: Iterable[str] | None = None,
+        timeout_ticks: int = 60 * 60 * 10,
     ) -> Position:
-        """
-        Move to a position.
-        :param position: Position to move to.
-        :return: Your final position
-        """
+        if mode.lower() != "walk":
+            raise ValueError("move_to currently supports mode='walk' only")
+        if stop_distance < 0:
+            raise ValueError("stop_distance must be non-negative")
+        route = list(waypoints or []) + [position]
+        final = self.game_state.player_location
+        receipts = []
+        for index, target in enumerate(route):
+            final, receipt = self._move_one(
+                target,
+                laying=laying,
+                leading=leading,
+                stop_distance=stop_distance if index == len(route) - 1 else 0,
+                interrupt_on={str(value).lower() for value in (interrupt_on or ())},
+                timeout_ticks=timeout_ticks,
+            )
+            receipts.append(receipt)
+            if receipt["status"] != "completed":
+                break
+        self.last_receipt = {
+            "status": receipts[-1]["status"] if receipts else "completed",
+            "position": {"x": final.x, "y": final.y},
+            "ticks_elapsed": sum(item["ticks_elapsed"] for item in receipts),
+            "stop_reason": receipts[-1]["stop_reason"] if receipts else "arrived",
+            "segments": receipts,
+        }
+        return final
 
-        X_OFFSET, Y_OFFSET = 0, 0  # 0.5, 0
+    def _move_one(
+        self, position, *, laying, leading, stop_distance, interrupt_on, timeout_ticks
+    ):
+        if not isinstance(position, Position):
+            position = getattr(position, "position", None)
+        if not isinstance(position, Position):
+            raise ValueError("move_to target must be a Position or Entity")
+        if timeout_ticks <= 0:
+            raise ValueError("timeout_ticks must be positive")
 
-        x, y = (
-            math.floor(position.x * 4) / 4 + X_OFFSET,
-            math.floor(position.y * 4) / 4 + Y_OFFSET,
+        current = self.game_state.player_location
+        dx, dy = position.x - current.x, position.y - current.y
+        distance = math.hypot(dx, dy)
+        if distance <= stop_distance:
+            return current, {
+                "status": "completed",
+                "ticks_elapsed": 0,
+                "stop_reason": "already_in_range",
+            }
+        # Let the pathfinder choose a reachable approach within the requested
+        # radius; a straight-line offset can itself land inside an obstacle.
+        goal = position
+        for resolution in (0, -1):
+            path_handle = self.request_path(
+                start=Position(x=current.x, y=current.y),
+                finish=goal,
+                allow_paths_through_own_entities=False,
+                resolution=resolution,
+                radius=max(stop_distance, 0.15),
+                entity_size=None,
+            )
+            try:
+                self.get_path(path_handle)
+                break
+            except Exception as exc:
+                if resolution == -1 or "not_found" not in str(exc):
+                    raise
+        start_tick = self._game_tick()
+        trailing_name, trailing_mode = NONE, NONE
+        if laying is not None:
+            trailing_name, trailing_mode = laying.value[0], 1
+        elif leading is not None:
+            trailing_name, trailing_mode = leading.value[0], 0
+        response, _ = self.execute(
+            self.player_index, path_handle, trailing_name, trailing_mode, 0
         )
-        nposition = Position(x=x, y=y)
+        if isinstance(response, str) or response in ({}, 0, None):
+            raise Exception(f"Cannot move to ({goal.x}, {goal.y}): {response}")
 
-        path_handle = self.request_path(
-            start=Position(
-                x=self.game_state.player_location.x, y=self.game_state.player_location.y
-            ),
-            finish=nposition,
-            allow_paths_through_own_entities=True,
-            resolution=-1,
-        )
+        if self.game_state.instance.fast:
+            final = Position(x=response["x"], y=response["y"])
+            self.game_state.player_location = final
+            return final, {
+                "status": "completed",
+                "ticks_elapsed": max(self._game_tick() - start_tick, 0),
+                "stop_reason": "arrived",
+            }
 
-        # Wait for path to be computed using get_path with backoff polling
-        # This fixes the race condition where move_to was called before path was ready
-        try:
-            self.get_path(path_handle)
-        except Exception as e:
-            raise Exception(f"Could not get path to ({x}, {y}): {e}")
+        deadline = start_tick + timeout_ticks
+        status = {"active": True}
+        while status.get("active"):
+            sleep(0.05)
+            status, _ = self.execute(self.player_index, "__status__", NONE, NONE, 0)
+            if not isinstance(status, dict):
+                raise Exception(f"Cannot read walking status: {status}")
+            if self._game_tick() >= deadline:
+                status, _ = self.execute(self.player_index, "__cancel__", NONE, NONE, 0)
+                status["stop_reason"] = "timeout"
+            event = str(status.get("event") or "").lower()
+            if event and event in interrupt_on:
+                status, _ = self.execute(self.player_index, "__cancel__", NONE, NONE, 0)
+                status["stop_reason"] = event
 
-        # Track elapsed ticks for fast forward
-        ticks_before = self.game_state.instance.get_elapsed_ticks()
+        final = Position(x=float(status["x"]), y=float(status["y"]))
+        self.game_state.player_location = final
+        reason = str(status.get("stop_reason") or "arrived")
+        if reason == "blocked_no_progress":
+            raise RuntimeError(
+                f"Movement blocked near ({final.x:.2f}, {final.y:.2f}); "
+                "the requested destination may be occupied. Use a positive "
+                "stop_distance or call the intended interaction action directly."
+            )
+        return final, {
+            "status": "completed"
+            if reason in {"arrived", "already_in_range"}
+            else "partial",
+            "ticks_elapsed": max(self._game_tick() - start_tick, 0),
+            "stop_reason": reason,
+        }
 
-        try:
-            if laying is not None:
-                entity_name = laying.value[0]
-                response, execution_time = self.execute(
-                    self.player_index, path_handle, entity_name, 1
-                )
-            elif leading:
-                entity_name = leading.value[0]
-                response, execution_time = self.execute(
-                    self.player_index, path_handle, entity_name, 0
-                )
-            else:
-                response, execution_time = self.execute(
-                    self.player_index, path_handle, NONE, NONE
-                )
-
-            # Sleep for the appropriate real-world time based on elapsed ticks
-            ticks_after = self.game_state.instance.get_elapsed_ticks()
-            ticks_added = ticks_after - ticks_before
-            if ticks_added > 0:
-                game_speed = self.game_state.instance.get_speed()
-                real_world_sleep = (
-                    ticks_added / 60 / game_speed if game_speed > 0 else 0
-                )
-                sleep(real_world_sleep)
-
-            if isinstance(response, int) and response == 0:
-                raise Exception("Could not move.")
-
-            if isinstance(response, str):
-                raise Exception(f"Could not move. {response}")
-
-            if response == "trailing" or response == "leading":
-                raise Exception("Could not lay entity, perhaps a typo?")
-
-            if response and isinstance(response, dict):
-                self.game_state.player_location = Position(
-                    x=response["x"], y=response["y"]
-                )
-
-            # If `fast` is turned off - we need to long poll the game state to ensure the player has moved
-            if not self.game_state.instance.fast:
-                remaining_steps = self.connection.rcon_client.send_command(
-                    f"/silent-command rcon.print(storage.actions.get_walking_queue_length({self.player_index}))"
-                )
-                while remaining_steps != "0":
-                    sleep(0.5)
-                    remaining_steps = self.connection.rcon_client.send_command(
-                        f"/silent-command rcon.print(storage.actions.get_walking_queue_length({self.player_index}))"
-                    )
-                self.game_state.player_location = Position(x=position.x, y=position.y)
-
-            return Position(x=response["x"], y=response["y"])  # , execution_time
-        except Exception as e:
-            if response:
-                raise Exception(f"Cannot move. {e} - {response}")
-            raise Exception(f"Cannot move. {e}")
+    def _game_tick(self) -> int:
+        raw = self.connection.rcon_client.send_command("/sc rcon.print(game.tick)")
+        return int(raw or 0)

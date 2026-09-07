@@ -4,7 +4,7 @@ local function find_rocket_silo(surface, position)
         name = "rocket-silo",
         position = position,
         limit = 1,
-        radius=1000
+        radius=0.1
     }
     return silo[1]
 end
@@ -19,26 +19,23 @@ local function is_rocket_ready(silo)
 end
 
 -- Function to launch rocket from specified position
-storage.actions.launch_rocket = function(x, y)
+storage.actions.launch_rocket = function(player_index, x, y)
     -- Get the current game surface
-    local surface = game.surfaces[1]
+    local character = storage.utils.ensure_valid_character(player_index)
+    local surface = character.surface
     local position = {x=x, y=y}
     -- Find rocket silo at the given position
     local silo = find_rocket_silo(surface, position)
 
-    if not silo then
-        game.print("No rocket silo found at specified position")
-        return false
+    if not silo or silo.force ~= character.force then
+        error("No player-owned rocket silo at the specified position")
     end
 
     -- Check if silo has a rocket ready
     if not is_rocket_ready(silo) then
-        game.print("Rocket is not ready for launch")
-        return false
+        error("Rocket is not ready for launch")
     end
 
     -- Launch the rocket
-    silo.launch_rocket()
-    game.print("Rocket launched successfully!")
-    return true
+    return silo.launch_rocket()
 end

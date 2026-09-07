@@ -1,66 +1,30 @@
 # harvest_resource
 
-The `harvest_resource` tool allows you to harvest resources like ores, trees, rocks and stumps from the Factorio world. This guide explains how to use it effectively.
-
-## Basic Usage
+Harvest ores or wood through native character mining.
 
 ```python
 harvest_resource(position: Position, quantity: int = 1, radius: int = 10) -> int
 ```
 
-The function returns the actual quantity harvested.
-
-### Parameters
-
-- `position`: Position object indicating where to harvest from
-- `quantity`: How many resources to harvest (default: 1)
-- `radius`: Search radius around the position (default: 10)
-
-### Examples
+The action walks into mining range of the requested position. A separate
+`move_to` call is optional. Mining and walking consume simulation time.
 
 ```python
-# Harvest 10 coal from nearest coal patch
-coal_pos = nearest(Resource.Coal)
-move_to(coal_pos)
-harvested = harvest_resource(coal_pos, quantity=10)
-
-# Harvest 5 iron ore
-iron_pos = nearest(Resource.IronOre)
-move_to(iron_pos)
-harvested = harvest_resource(iron_pos, quantity=5)
+harvested = harvest_resource(nearest(Resource.Coal), 10)
+harvested = harvest_resource(nearest(Resource.Stone), 5)
+harvested = harvest_resource(nearest(Resource.Wood), 5)
 ```
 
-## Important Rules
+Use a positive integer quantity. The result is the actual inventory gain, which
+can exceed the request when a tree yields several wood. If a tree is exhausted,
+the action approaches another tree to finish the request. Ore remains selected
+until the requested quantity has been mined.
 
-1. You **must move to the resource** before harvesting:
+Supported resource names include `Resource.Coal`, `Resource.IronOre`,
+`Resource.CopperOre`, `Resource.Stone`, `Resource.UraniumOre`, and `Resource.Wood`.
+The supplied position must identify the resource; `radius` does not extend the
+character's mining reach.
 
-```python
-# Wrong - will fail
-harvest_resource(nearest(Resource.Coal), 10)
-
-# Correct
-coal_pos = nearest(Resource.Coal)
-move_to(coal_pos)
-harvest_resource(coal_pos, 10)
-```
-
-## Harvestable Resources
-
-The tool can harvest:
-
-1. Basic Resources
-
-- Coal (Resource.Coal)
-- Iron Ore (Resource.IronOre)
-- Copper Ore (Resource.CopperOre)
-- Stone (Resource.Stone)
-
-2. Trees (Resource.Wood)
-
-- Harvesting trees yields wood
-- Creates stumps that can be harvested again
-
-3. Rocks and Stumps
-
-- Rock harvesting yields stone
-- Stump harvesting yields additional wood
+A stalled action stops mining and reports its actual progress after 30 simulated
+seconds without an inventory increase. Inspect the target, reach, and available
+inventory space before retrying. Items gained before an error remain in inventory.

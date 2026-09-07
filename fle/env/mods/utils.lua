@@ -195,14 +195,100 @@ function dump(o)
    if type(o) == 'table' then
       local s = '{ '
       for k,v in pairs(o) do
-         if type(k) ~= 'number' then k = '"'..k..'"' end
+         if type(k) ~= 'number' then k = string.format('%q', k) end
          s = s .. '['..k..'] = ' .. dump(v) .. ','
       end
       return s .. '} '
+   elseif type(o) == 'string' then
+      -- Older entity serializers wrap scalar strings in quotes themselves.
+      -- Normalize that representation once, then quote every string at the
+      -- transport boundary, including raw diagnostic strings and item names.
+      if o:sub(1,1) == '"' and o:sub(-1) == '"' and #o >= 2 then
+         o = o:sub(2,-2)
+      end
+      return string.format('%q', o)
    else
       return tostring(o)
    end
 end
+
+-- Unconnected character entities craft natively, but Factorio does not enter
+-- their completed handcrafts into force production statistics. Those flows
+-- drive craft-item research triggers. Observe only active queues and account
+-- completed recipes (including native intermediate crafts), never requests.
+local function native_craft_counts(character)
+    local counts = {}
+    for _, entry in ipairs(character.crafting_queue or {}) do
+        counts[entry.recipe] = (counts[entry.recipe] or 0) + entry.count
+    end
+    return counts
+end
+
+storage.utils.sync_native_crafting = function(player_index)
+    local pending = storage.native_crafting and storage.native_crafting[player_index]
+    if not pending then return end
+    local character = storage.agent_characters[player_index]
+    if not character or not character.valid or character ~= pending.character then
+        storage.native_crafting[player_index] = nil
+        return
+    end
+    local current = native_craft_counts(character)
+    local stats = character.force.get_item_production_statistics(character.surface)
+    for name, previous in pairs(pending.counts) do
+        local completed = previous - (current[name] or 0)
+        if completed > 0 then
+            local recipe = character.force.recipes[name]
+            local record = {crafted_count=completed, inputs={}, outputs={}}
+            for _, ingredient in pairs(recipe.ingredients) do
+                if ingredient.type == 'item' then
+                    local count = ingredient.amount * completed
+                    record.inputs[ingredient.name] = count
+                    if not character.player then stats.on_flow(ingredient.name, -count) end
+                end
+            end
+            for _, product in pairs(recipe.products) do
+                if product.type == 'item' then
+                    local count = product.amount * completed
+                    record.outputs[product.name] = count
+                    if not character.player then stats.on_flow(product.name, count) end
+                end
+            end
+            storage.crafted_items = storage.crafted_items or {}
+            table.insert(storage.crafted_items, record)
+            storage.manual_production_events = storage.manual_production_events or {}
+            table.insert(storage.manual_production_events, {
+                tick=game.tick, kind='crafted', outputs=record.outputs
+            })
+        end
+    end
+    if next(current) then
+        pending.counts = current
+    else
+        storage.native_crafting[player_index] = nil
+    end
+end
+
+storage.utils.track_native_crafting = function(player_index)
+    local character = storage.agent_characters[player_index]
+    storage.native_crafting = storage.native_crafting or {}
+    local counts = native_craft_counts(character)
+    storage.native_crafting[player_index] = next(counts)
+        and {character=character, counts=counts} or nil
+end
+
+storage.utils.begin_native_crafting = function(player_index, recipe_name, count)
+    storage.utils.sync_native_crafting(player_index)
+    local character = storage.agent_characters[player_index]
+    local queued = character.begin_crafting{count=count, recipe=recipe_name}
+    storage.utils.track_native_crafting(player_index)
+    return queued
+end
+
+script.on_nth_tick(1, function()
+    for player_index in pairs(storage.native_crafting or {}) do
+        storage.utils.sync_native_crafting(player_index)
+    end
+end)
 
 function storage.utils.inspect(player, radius, position)
     local surface = player.surface

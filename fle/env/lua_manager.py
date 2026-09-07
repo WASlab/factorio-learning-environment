@@ -21,13 +21,28 @@ from fle.env.utils.rcon import (
 class LuaScriptManager:
     def __init__(self, rcon_client: RCONClient, cache_scripts: bool = False):
         self.rcon_client = rcon_client
-        self.cache_scripts = cache_scripts
-        if not cache_scripts:
+        self.runtime_bundled = self._has_bundled_runtime()
+        if self.runtime_bundled:
+            from fle.cluster.runtime_scenario import runtime_build_id
+
+            expected = runtime_build_id(Path(__file__).parent)
+            actual = self.rcon_client.send_command(
+                "/sc local ok,value=pcall(remote.call,'fle_runtime','dispatch','__build_id'); "
+                "rcon.print(ok and value or 'unversioned')"
+            )
+            if (actual or "").strip() != expected:
+                raise RuntimeError(
+                    "Factorio is running a stale FLE Lua runtime. Regenerate the "
+                    "runtime mod and restart the Factorio server before connecting. "
+                    f"Expected {expected}, received {(actual or '').strip()}."
+                )
+        self.cache_scripts = cache_scripts and not self.runtime_bundled
+        if not self.cache_scripts and not self.runtime_bundled:
             self._clear_game_checksums(rcon_client)
         # self.action_directory = _get_action_dir()
 
         self.lib_directory = _get_mods_dir()
-        if cache_scripts:
+        if self.cache_scripts:
             self.init_action_checksums()
             self.game_checksums = self._get_game_checksums(rcon_client)
 
@@ -35,6 +50,33 @@ class LuaScriptManager:
 
         self.lib_scripts = self.get_libs_to_load()
         self.lua = LuaRuntime(unpack_returned_tuples=True)
+
+    def _has_bundled_runtime(self) -> bool:
+        command = (
+            "/sc rcon.print(remote.interfaces['fle_runtime'] and "
+            "remote.interfaces['fle_runtime']['dispatch'] and 'true' or 'false')"
+        )
+        for _ in range(2):
+            response = self.rcon_client.send_command(command)
+            if response and response.strip() == "true":
+                return True
+        return False
+
+    def action_invocation(self, name: str, parameters: list[str]) -> str:
+        suffix = (", " + ",".join(parameters)) if parameters else ""
+        if self.runtime_bundled:
+            return f'pcall(remote.call, "fle_runtime", "dispatch", "{name}"{suffix})'
+        return f"pcall(storage.actions.{name}{suffix})"
+
+    def action_command(self, name: str, parameters: list[str], command: str) -> str:
+        if self.runtime_bundled:
+            suffix = (", " + ",".join(parameters)) if parameters else ""
+            return (
+                f'{command} rcon.print(remote.call("fle_runtime", "dispatch", '
+                f'"__dispatch_serialized", "{name}"{suffix}))'
+            )
+        invocation = self.action_invocation(name, parameters)
+        return f"{command} a, b = {invocation}; rcon.print(dump({{a=a, b=b}}))"
 
     def init_action_checksums(self):
         checksum_init_script = _load_mods("checksum")
@@ -52,6 +94,8 @@ class LuaScriptManager:
             return False, e.args[0]
 
     def load_tool_into_game(self, name):
+        if self.runtime_bundled:
+            return
         # Select scripts by exact tool directory, not prefix
         tool_dirs = {
             f"agent/{name}",
@@ -94,6 +138,8 @@ class LuaScriptManager:
                 raise Exception(response)
 
     def load_init_into_game(self, name):
+        if self.runtime_bundled:
+            return
         if name not in self.lib_scripts:
             # attempt to load the script from the filesystem
             script = _load_mods(name)

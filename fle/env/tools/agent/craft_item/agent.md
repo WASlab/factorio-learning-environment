@@ -51,3 +51,9 @@ craft_item(Prototype.IronChest, quantity=5)
 # Craft 20 copper cables (requires 10 copper plates)
 craft_item(Prototype.CopperCable, quantity=20)
 ```
+
+In native mode, this action waits for the accepted craft to finish. Recipe
+intermediates follow Factorio's native queue, and completed output can exceed
+an odd requested quantity for recipes that produce several items at once.
+Use `queue_craft` when crafting should overlap other actions. Completed crafts,
+including intermediates, drive the engine's craft-item research triggers.

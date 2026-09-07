@@ -58,7 +58,7 @@ local function start_mining_entity(player, entity)
 
         -- Then set mining state with position
         if not player.mining_state.mining then
-            player.update_selected_entity(entity.position)
+            player.selected = entity
             player.mining_state = {
                 mining = true,
                 position = entity.position
@@ -119,9 +119,12 @@ script.on_nth_tick(15, function(event)
         -- Skip if player not valid
         if not player or not player.valid then goto continue end
 
-        -- Already reached or exceeded our target?
+        queue.total_yield = math.max(
+            player.get_item_count(queue.product_name or "") - (queue.start_count or 0),
+            0
+        )
         if queue.total_yield >= queue.target_yield then
-            -- Remove this player's queue
+            player.mining_state = {mining=false}
             storage.harvest_queues[player_index] = nil
             goto continue
         end
@@ -145,69 +148,17 @@ script.on_nth_tick(15, function(event)
                 goto continue
             end
 
-            -- Start mining
-            queue.current_mining = {
-                entity = next_entity,
-                start_tick = game.tick
-            }
+            queue.current_mining = start_mining_entity(player, next_entity)
         else
-            -- We have a current entity being mined
             local entity = queue.current_mining.entity
             if not entity or not entity.valid or not entity.minable then
-                -- Entity no longer valid, skip
                 queue.current_mining = nil
                 goto continue
             end
-
-            local ticks_mining = game.tick - queue.current_mining.start_tick
-            if ticks_mining >= 30 then
-                -- Time to finish mining
-                -- Factorio 2.0: Use compat wrapper for get_contents()
-                local inv_before = storage.utils.get_contents_compat(player.get_main_inventory())
-                local mined_ok = player.mine_entity(entity)  -- Instantly mines & adds items
-                if mined_ok then
-                    local inv_after = storage.utils.get_contents_compat(player.get_main_inventory())
-
-                    -- Figure out how many items we actually gained
-                    local items_added = 0
-                    for name, after_count in pairs(inv_after) do
-                        local before_count = inv_before[name] or 0
-                        items_added = items_added + (after_count - before_count)
-                    end
-
-                    if items_added > 0 then
-                        -- Add to our queue's total_yield
-                        local new_total = queue.total_yield + items_added
-
-                        if new_total > queue.target_yield then
-                            -- We overshot. Remove the extras from the player's inventory.
-                            local overshoot = new_total - queue.target_yield
-                            -- We'll try to remove it from whatever items were gained.
-                            -- If multiple resource types might drop, you'd handle them individually.
-
-                            local overshoot_left = overshoot
-                            for name, after_count in pairs(inv_after) do
-                                local before_count = inv_before[name] or 0
-                                local gained_this_item = (after_count - before_count)
-                                if gained_this_item > 0 then
-                                    local to_remove = math.min(overshoot_left, gained_this_item)
-                                    local actually_removed = player.remove_item({name = name, count = to_remove})
-                                    overshoot_left = overshoot_left - actually_removed
-                                    if overshoot_left <= 0 then
-                                        break
-                                    end
-                                end
-                            end
-                            new_total = queue.target_yield
-                        end
-
-                        queue.total_yield = new_total
-                    end
-                end
-
-                -- Clear current mining
-                queue.current_mining = nil
-            end
+            -- Keep native mining active. Factorio applies the prototype's
+            -- actual mining speed, inventory insertion, and world events.
+            player.selected = entity
+            player.mining_state = {mining=true, position=entity.position}
         end
         ::continue::
     end
@@ -287,13 +238,20 @@ local function harvest_specific_resources(player, surface, position, count, targ
 end
 
 
-local function find_entities_at_position(surface, position, entity_types, exact)
-    local radius = exact and 0.1 or nil  -- Use tiny radius for exact position check
-    return surface.find_entities_filtered{
+local function find_entities_at_position(surface, position, entity_types, exact, nearby_radius)
+    local radius = exact and 0.1 or (nearby_radius or 1.5)
+    local candidates = surface.find_entities_filtered{
         position = position,
         type = entity_types,
         radius = radius
     }
+    local entities = {}
+    for _, entity in ipairs(candidates) do
+        if distance(entity.position, position) <= radius then
+            entities[#entities+1] = entity
+        end
+    end
+    return sort_entities_by_distance(entities, position)
 end
 
 local function begin_mining(queue, player)
@@ -330,17 +288,25 @@ local function harvest_resource_slow(player, player_index, surface, position, co
    if #exact_entities > 0 then
        local queue = initialize_harvest_queue(player_index, position, count)
        local expected_yield = add_entities_to_queue(queue, exact_entities, count)
+       local product = exact_entities[1].prototype.mineable_properties.products[1]
+       queue.product_name = product and product.name or exact_entities[1].name
+       queue.start_count = player.get_item_count(queue.product_name)
        begin_mining(queue, player)
        return expected_yield
    end
 
-   local radius_entities = find_entities_at_position(surface, position, {"tree", "resource"}, false)
+   local radius_entities = find_entities_at_position(
+       surface, position, {"tree", "resource"}, false, player.resource_reach_distance
+   )
    if #radius_entities == 0 then
        error("No harvestable entities found within range")
    end
 
    local queue = initialize_harvest_queue(player_index, position, count)
    local expected_yield = add_entities_to_queue(queue, radius_entities, count)
+   local product = radius_entities[1].prototype.mineable_properties.products[1]
+   queue.product_name = product and product.name or radius_entities[1].name
+   queue.start_count = player.get_item_count(queue.product_name)
    -- game.print("expected "..expected_yield)
    begin_mining(queue, player)
    return expected_yield
@@ -484,9 +450,9 @@ storage.actions.harvest_resource = function(player_index, x, y, count, radius)
         error("Nothing within reach to harvest")
     end
 
-    --if not storage.fast then
-    --    return harvest_resource_slow(player, player_index, surface, position, count, radius)
-    --end
+    if not storage.fast then
+        return harvest_resource_slow(player, player_index, surface, position, count, radius)
+    end
 
     local total_yield = 0
     if target_type then
@@ -596,6 +562,8 @@ end
 
 
 storage.actions.clear_harvest_queue = function(player_index)
+    local player = storage.agent_characters[player_index]
+    if player and player.valid then player.mining_state = {mining=false} end
     if storage.harvest_queues and storage.harvest_queues[player_index] then
         storage.harvest_queues[player_index] = nil
     end
@@ -603,7 +571,10 @@ end
 
 storage.actions.get_harvest_queue_length = function(player_index)
     if storage.harvest_queues and storage.harvest_queues[player_index] then
-        return #storage.harvest_queues[player_index].entities
+        -- Include the entity currently being mined. Returning zero while the
+        -- final entity is still active makes the Python option finish early.
+        local queue = storage.harvest_queues[player_index]
+        return #queue.entities + (queue.current_mining and 1 or 0)
     end
     return 0
 end
@@ -617,12 +588,11 @@ storage.actions.get_resource_name_at_position = function(player_index, x, y)
     local position = {x=x, y=y}
     local surface = player.surface
 
-    local entities = surface.find_entities_filtered{
-        position = position,
-        radius = player.resource_reach_distance,
-        type = {"tree", "resource"},
-        limit = 1
-    }
+    -- Match the same center-distance ordering used to select a mining target.
+    -- Engine query order is not proximity order, especially at ore borders.
+    local entities = find_entities_at_position(
+        surface, position, {"tree", "resource"}, false, player.resource_reach_distance
+    )
     local entity_name = nil
     if #entities > 0 then
         entity_name = entities[1].name

@@ -1,4 +1,3 @@
-import json
 import time
 from timeit import default_timer as timer
 from typing import List, Tuple, Dict, Any
@@ -174,26 +173,15 @@ class Controller:
         """Execute a single command attempt, returns (result, elapsed, lua_response)"""
         start = time.time()
         parameters = [lua.encode(arg) for arg in args]
-        invocation = f"pcall(storage.actions.{self.name}{(', ' if parameters else '') + ','.join(parameters)})"
-        wrapped = f"{COMMAND} a, b = {invocation}; rcon.print(dump({{a=a, b=b}}))"
+        invocation = self.lua_script_manager.action_invocation(self.name, parameters)
+        wrapped = self.lua_script_manager.action_command(self.name, parameters, COMMAND)
         lua_response = self.connection.rcon_client.send_command(wrapped)
 
         # Check for [processing] error from RCON layer
         if self._check_for_processing_error(lua_response):
             raise RconProcessingError("Game engine busy (processing), try again")
 
-        try:
-            possible_json = lua_response.split('["b"] = ')[
-                1
-            ]  # get a possible json blob
-            possible_json = possible_json.replace(",}", "")  # hacky lua table to json
-            parsed1 = json.loads(possible_json)
-            if isinstance(parsed1, dict):
-                parsed = {"a": True, "b": parsed1}
-            else:
-                parsed, _ = _lua2python(invocation, lua_response, start=start)
-        except Exception:
-            parsed, _ = _lua2python(invocation, lua_response, start=start)
+        parsed, _ = _lua2python(invocation, lua_response, start=start)
 
         return parsed, lua_response
 
@@ -203,18 +191,7 @@ class Controller:
                 parsed, lua_response = self._execute_once(*args)
 
                 if parsed is None:
-                    # Parsing failed - try to extract error message from raw RCON response
-                    # This handles cases where pcall error strings break the Lua parser
-                    parts = lua_response.split('["b"] = ') if lua_response else []
-                    if len(parts) > 1:
-                        msg = parts[1].rstrip()
-                        if msg.endswith(",}") or msg.endswith(", }"):
-                            msg = msg.rsplit(",", 1)[0]
-                        elif msg.endswith("}"):
-                            msg = msg[:-1]
-                        msg = msg.strip()
-                        return msg, lua_response
-                    return {}, lua_response
+                    raise RuntimeError(f"Invalid action response: {lua_response!r}")
 
                 if (
                     not parsed.get("a")
@@ -227,17 +204,6 @@ class Controller:
                             "Game engine busy (processing), try again"
                         )
 
-                    # Extract the full error string from the RCON dump instead of truncating by colon
-                    parts = lua_response.split('["b"] = ')
-                    if len(parts) > 1:
-                        msg = parts[1]
-                        # Trim trailing table end and whitespace
-                        msg = msg.rstrip()
-                        if msg.endswith("}"):
-                            msg = msg[:-2] if len(msg) >= 2 else msg
-                        msg = msg.replace("!!", '"').strip()
-                        return msg, lua_response
-                    # Fallback to the parsed string as-is
                     return parsed["b"], lua_response
 
                 return parsed.get("b", {}), lua_response  # elapsed
@@ -247,8 +213,8 @@ class Controller:
                     time.sleep(PROCESSING_RETRY_DELAY)
                 continue
 
-            except Exception:
-                return {}, -1
+            except Exception as exc:
+                raise RuntimeError(f"RCON action {self.name} failed: {exc}") from exc
 
         # All retries exhausted
         return (
@@ -261,8 +227,12 @@ class Controller:
         try:
             start = time.time()
             parameters = [lua.encode(arg) for arg in args]
-            invocation = f"pcall(storage.actions.{self.name}{(', ' if parameters else '') + ','.join(parameters)})"
-            wrapped = f"{COMMAND} a, b = {invocation}; rcon.print(dump({{a=a, b=b}}))"
+            invocation = self.lua_script_manager.action_invocation(
+                self.name, parameters
+            )
+            wrapped = self.lua_script_manager.action_command(
+                self.name, parameters, COMMAND
+            )
             lua_response = self.connection.rcon_client.send_command(wrapped)
             parsed, elapsed = _lua2python(invocation, lua_response, start=start)
             if not parsed["a"] and "b" in parsed and isinstance(parsed["b"], str):

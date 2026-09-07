@@ -1,13 +1,11 @@
 -- move_to
 
 -- Register the tick handler when the module is loaded
-if not storage.fast then
-    script.on_nth_tick(5, function(event)
-        if storage.walking_queues then
+    script.on_nth_tick(1, function(event)
+        if not storage.fast and storage.walking_queues then
             storage.actions.update_walking_queues()
         end
     end)
-end
 
 --local function get_direction(from_pos, to_pos)
 --    local dx = to_pos.x - from_pos.x
@@ -22,9 +20,25 @@ end
 --end
 
 
-storage.actions.move_to = function(player_index, path_handle, trailing_entity, is_trailing)
+storage.actions.move_to = function(player_index, path_handle, trailing_entity, is_trailing, stop_distance)
     -- Ensure we have a valid character, recreating if necessary
     local player = storage.utils.ensure_valid_character(player_index)
+    if path_handle == "__status__" then
+        local queue = storage.walking_queues and storage.walking_queues[player_index]
+        local interrupt = nil
+        if queue then
+            for _, event in ipairs(storage.semantic_events or {}) do
+                if event.tick >= (queue.start_tick or game.tick) then interrupt = event.type end
+            end
+        end
+        return {active = queue ~= nil and queue.current_target ~= nil,
+            x = player.position.x, y = player.position.y,
+            stop_reason = queue and queue.stop_reason or "arrived", event=interrupt}
+    elseif path_handle == "__cancel__" then
+        player.walking_state = {walking = false}
+        if storage.walking_queues then storage.walking_queues[player_index] = nil end
+        return {active=false, x=player.position.x, y=player.position.y, stop_reason="cancelled"}
+    end
     local path = storage.paths[path_handle]
     local surface = player.surface
 
@@ -50,18 +64,40 @@ storage.actions.move_to = function(player_index, path_handle, trailing_entity, i
                 positions = {},
                 current_target = nil,
                 trailing_entity = trailing_entity,
-                is_trailing = is_trailing
+                is_trailing = is_trailing,
+                stop_distance = stop_distance or 0,
+                final_target = path[#path].position,
+                stop_reason = nil,
+                start_tick = game.tick,
+                last_progress_tick = game.tick,
+                last_position = {x = player.position.x, y = player.position.y}
             }
         else
             storage.walking_queues[player_index].positions = {}
             storage.walking_queues[player_index].current_target = nil
             storage.walking_queues[player_index].trailing_entity = trailing_entity
             storage.walking_queues[player_index].is_trailing = is_trailing
+            storage.walking_queues[player_index].stop_distance = stop_distance or 0
+            storage.walking_queues[player_index].final_target = path[#path].position
+            storage.walking_queues[player_index].stop_reason = nil
+            storage.walking_queues[player_index].start_tick = game.tick
+            storage.walking_queues[player_index].last_progress_tick = game.tick
+            storage.walking_queues[player_index].best_distance = nil
+            storage.walking_queues[player_index].last_position = {x = player.position.x, y = player.position.y}
         end
 
-        -- Add all path positions to the queue
+        -- Follow the pathfinder's segments, not a diagonal-then-cardinal shortcut
+        -- toward a distant waypoint. Dense steering targets preserve clearance.
+        local previous = player.position
         for _, point in ipairs(path) do
-            table.insert(storage.walking_queues[player_index].positions, point.position)
+            local dx = point.position.x - previous.x
+            local dy = point.position.y - previous.y
+            local steps = math.max(1, math.ceil(math.sqrt(dx*dx + dy*dy) / 0.5))
+            for step=1,steps do
+                table.insert(storage.walking_queues[player_index].positions,
+                    {x=previous.x + dx*step/steps, y=previous.y + dy*step/steps})
+            end
+            previous = point.position
         end
 
         -- Start walking to first position
@@ -225,17 +261,46 @@ storage.actions.update_walking_queues = function()
         local player = storage.utils.ensure_valid_character(player_index)
         if not player or not queue.current_target then goto continue end
 
+        local final_distance = queue.final_target and ((player.position.x - queue.final_target.x)^2 +
+                         (player.position.y - queue.final_target.y)^2)^0.5 or math.huge
+        if final_distance <= (queue.stop_distance or 0) then
+            player.walking_state = {walking = false}
+            queue.positions = {}
+            queue.current_target = nil
+            queue.stop_reason = "arrived"
+            goto continue
+        end
+
         local distance = ((player.position.x - queue.current_target.x)^2 +
                          (player.position.y - queue.current_target.y)^2)^0.5
 
+        -- A requested point can itself be occupied (for example, the Position
+        -- returned for a tree). Do not steer into its collision box forever.
+        -- This detects physical progress only; it does not choose a new route
+        -- or alter the model's requested destination.
+        if not queue.best_distance or distance < queue.best_distance - 0.05 then
+            queue.best_distance = distance
+            queue.last_progress_tick = game.tick
+        elseif game.tick - (queue.last_progress_tick or game.tick) >= 180 then
+            player.walking_state = {walking = false}
+            queue.positions = {}
+            queue.current_target = nil
+            queue.stop_reason = "blocked_no_progress"
+            goto continue
+        end
+
         -- If player is close enough to current target
-        if distance < 1 then
+        -- Stay inside the pathfinder's clearance margin at obstacle corners.
+        -- A one-tile shortcut can cut straight through a tree collision box.
+        if distance < 0.25 then
             -- Remove the current position from queue
             table.remove(queue.positions, 1)
 
             -- If there are more positions, start walking to next one
             if #queue.positions > 0 then
                 queue.current_target = queue.positions[1]
+                queue.last_progress_tick = game.tick
+                queue.best_distance = nil
                 player.walking_state = {
                     walking = true,
                     direction = storage.utils.get_direction_with_diagonals(player.position, queue.current_target)
@@ -244,6 +309,7 @@ storage.actions.update_walking_queues = function()
                 -- Queue is empty, stop walking
                 player.walking_state = {walking = false}
                 queue.current_target = nil
+                queue.stop_reason = "arrived"
             end
         else
             -- Update walking direction to current target

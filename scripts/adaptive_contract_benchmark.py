@@ -18,6 +18,7 @@ import argparse
 import asyncio
 import hashlib
 import json
+import math
 import os
 import re
 import shutil
@@ -198,9 +199,7 @@ class AgentEpochTelemetry:
         # those continuations an evaluation budget.
         self.invocations = invocations
         self.continuation_reasons = list(continuation_reasons or [])
-        self.provider_step_finish_reasons = list(
-            provider_step_finish_reasons or []
-        )
+        self.provider_step_finish_reasons = list(provider_step_finish_reasons or [])
         self.stop_reason = stop_reason
         self.failure_category = failure_category
 
@@ -214,9 +213,7 @@ class AgentEpochTelemetry:
             "response_chars": self.response_chars,
             "invocations": self.invocations,
             "continuation_reasons": list(self.continuation_reasons),
-            "provider_step_finish_reasons": list(
-                self.provider_step_finish_reasons
-            ),
+            "provider_step_finish_reasons": list(self.provider_step_finish_reasons),
             "stop_reason": self.stop_reason,
             "failure_category": self.failure_category,
         }
@@ -486,9 +483,13 @@ class OpenAICompatibleAgentSession:
             }
         if name == "factorio_read_reference":
             document_id = str(arguments["document_id"])
-            if document_id.startswith("api/") or document_id.startswith("api:") or not any(
-                document_id.startswith(prefix)
-                for prefix in ("recipe:", "technology:", "prototype:")
+            if (
+                document_id.startswith("api/")
+                or document_id.startswith("api:")
+                or not any(
+                    document_id.startswith(prefix)
+                    for prefix in ("recipe:", "technology:", "prototype:")
+                )
             ):
                 return api.read(
                     document_id,
@@ -535,8 +536,7 @@ class OpenAICompatibleAgentSession:
                 result = result.model_dump(mode="json")
             terminal = (
                 f"contract_{result.get('contract_status')}"
-                if isinstance(result, dict)
-                and result.get("contract_status") != "open"
+                if isinstance(result, dict) and result.get("contract_status") != "open"
                 else None
             )
             return _bounded_json_text(result), terminal
@@ -648,9 +648,7 @@ class OpenAICompatibleAgentSession:
                                     request_id=call.id,
                                 )
                             else:
-                                raise ValueError(
-                                    f"unknown tool {call.function.name}"
-                                )
+                                raise ValueError(f"unknown tool {call.function.name}")
                         except (ValueError, TypeError, json.JSONDecodeError) as exc:
                             output = f"error: {type(exc).__name__}: {exc}"
                             terminal = None
@@ -901,6 +899,37 @@ def _parse_opencode_jsonl(output: str) -> tuple[list[dict[str, Any]], int]:
         if isinstance(event, dict):
             events.append(event)
     return events, malformed
+
+
+def _opencode_tool_seconds(output: str) -> float:
+    """Union completed tool intervals so repeated/overlapping events count once."""
+    events, _ = _parse_opencode_jsonl(output)
+    intervals = []
+    for event in events:
+        if event.get("type") != "tool_use":
+            continue
+        part = event.get("part")
+        state = part.get("state") if isinstance(part, dict) else None
+        timing = state.get("time") if isinstance(state, dict) else None
+        if not isinstance(timing, dict):
+            continue
+        start, end = timing.get("start"), timing.get("end")
+        if (
+            isinstance(start, (int, float))
+            and not isinstance(start, bool)
+            and isinstance(end, (int, float))
+            and not isinstance(end, bool)
+            and math.isfinite(start)
+            and math.isfinite(end)
+            and end >= start
+        ):
+            intervals.append((start, end))
+    total = 0.0
+    previous_end = float("-inf")
+    for start, end in sorted(intervals):
+        total += max(end - max(start, previous_end), 0.0)
+        previous_end = max(previous_end, end)
+    return total / 1000.0
 
 
 def _event_field(event: dict[str, Any], field: str) -> Any:
@@ -1204,9 +1233,7 @@ class OpenCodePersistentAgentSession:
                 "provider_invocations": len(invocation_records),
                 "invocations": invocation_records,
                 "continuation_reasons": list(continuation_reasons),
-                "provider_step_finish_reasons": list(
-                    provider_step_finish_reasons
-                ),
+                "provider_step_finish_reasons": list(provider_step_finish_reasons),
                 "terminal_observed": terminal_payload is not None,
                 "terminal_reason": self._terminal_reason(terminal_payload),
                 "stop_reason": stop_reason,
@@ -1277,7 +1304,9 @@ class OpenCodePersistentAgentSession:
                 if session_ids:
                     if self.session_id is None:
                         self.session_id = session_ids[0]
-                    elif any(session_id != self.session_id for session_id in session_ids):
+                    elif any(
+                        session_id != self.session_id for session_id in session_ids
+                    ):
                         session_error = "opencode_session_changed"
                 reasons = _parse_opencode_step_finish_reasons(stdout)
                 provider_step_finish_reasons.extend(reasons)
@@ -1332,8 +1361,8 @@ class OpenCodePersistentAgentSession:
                     failure_category = session_error
                     stop_reason = "provider_session_changed"
                 elif terminal_payload is not None:
-                    stop_reason = (
-                        "contract_terminal:" + self._terminal_reason(terminal_payload)
+                    stop_reason = "contract_terminal:" + self._terminal_reason(
+                        terminal_payload
                     )
                 elif bool(getattr(invocation, "timed_out", False)):
                     failure_category = "provider_timeout"
@@ -1418,9 +1447,12 @@ class OpenCodePersistentAgentSession:
             stop_reason=stop_reason,
             failure_category=failure_category,
         )
+        tool_seconds = min(_opencode_tool_seconds(combined_output), elapsed)
         return AgentEpochTelemetry(
-            model_seconds=elapsed,
-            tool_seconds=0.0,
+            # The remainder includes provider and harness overhead, as for
+            # the other persistent harnesses; it is not pure inference time.
+            model_seconds=max(elapsed - tool_seconds, 0.0),
+            tool_seconds=tool_seconds,
             turns=epoch_tool_calls,
             transport_errors=int(failure_category is not None),
             prompt_chars=prompt_chars,
@@ -1457,9 +1489,7 @@ def render_order_prompt(
     lines = spec.products or (
         ProductDemandSpec(product=spec.item_name, quantity=float(spec.quantity)),
     )
-    demand = ", ".join(
-        f"{round(line.quantity)} x {line.product}" for line in lines
-    )
+    demand = ", ".join(f"{round(line.quantity)} x {line.product}" for line in lines)
     service = (
         "This is a sustained-throughput order: deliveries are scored across "
         "the entire window, so an end-of-window burst does not substitute for "
@@ -1563,7 +1593,10 @@ def stopping_rule_met(
         and rating.rated_epoch_count >= config.max_rated_epochs
     ):
         return True
-    if config.max_session_ticks is not None and session_ticks >= config.max_session_ticks:
+    if (
+        config.max_session_ticks is not None
+        and session_ticks >= config.max_session_ticks
+    ):
         return True
     if (
         config.max_session_interventions is not None
@@ -1723,14 +1756,10 @@ async def run_session(args: argparse.Namespace) -> AdaptiveSessionRecord:
                 )
             raise ValueError(f"unknown memory tool: {name}")
 
-        async def _throughput_executor(
-            *, request_id: str | None = None
-        ) -> Any:
+        async def _throughput_executor(*, request_id: str | None = None) -> Any:
             return await client.check_contract_throughput(
                 lease.lease_id,
-                request_id=(
-                    f"native-throughput:{request_id}" if request_id else None
-                ),
+                request_id=(f"native-throughput:{request_id}" if request_id else None),
             )
 
         agent: AgentSession
@@ -1796,6 +1825,7 @@ async def run_session(args: argparse.Namespace) -> AdaptiveSessionRecord:
         mandatory_bands: set[int] = set()
         mandatory_mixtures: set[str] = set()
         epoch_index = 1
+
         async def _renew_environment_lease() -> None:
             await client.get_contract_session_state(lease.lease_id)
 
@@ -1965,6 +1995,7 @@ async def run_session(args: argparse.Namespace) -> AdaptiveSessionRecord:
                     tool_seconds_total,
                     infrastructure_error_count,
                     extrapolation_count,
+                    runner_wall_seconds=time.perf_counter() - session_wall_start,
                     progress_vector=progress_vector,
                     portfolio_evidence=portfolio_evidence,
                 )
@@ -2115,6 +2146,7 @@ async def run_session(args: argparse.Namespace) -> AdaptiveSessionRecord:
                     tool_seconds_total,
                     infrastructure_error_count,
                     extrapolation_count,
+                    runner_wall_seconds=time.perf_counter() - session_wall_start,
                     progress_vector=progress_vector,
                     portfolio_evidence=portfolio_evidence,
                 )
@@ -2302,8 +2334,7 @@ def build_progress_report(
     """
 
     deltas = [
-        epoch.capability_delta or epoch.outcome.capability_delta
-        for epoch in epochs
+        epoch.capability_delta or epoch.outcome.capability_delta for epoch in epochs
     ]
     deltas = [delta for delta in deltas if delta is not None]
     ledger = ledger_from_epochs(epochs)
@@ -2321,9 +2352,7 @@ def build_progress_report(
         "new_technologies": sorted(
             {item for delta in deltas for item in delta.new_technologies}
         ),
-        "new_recipes": sorted(
-            {item for delta in deltas for item in delta.new_recipes}
-        ),
+        "new_recipes": sorted({item for delta in deltas for item in delta.new_recipes}),
         "new_machines": sorted(
             {item for delta in deltas for item in delta.new_machines}
         ),
@@ -2332,8 +2361,7 @@ def build_progress_report(
         ),
     }
     portfolio = [
-        certificate.model_dump(mode="json")
-        for certificate in ledger.certificates
+        certificate.model_dump(mode="json") for certificate in ledger.certificates
     ]
     return vector, portfolio
 
@@ -2373,6 +2401,7 @@ def _persist(
     infra_count: int,
     extrapolation_count: int,
     *,
+    runner_wall_seconds: float = 0.0,
     progress_vector: Any = None,
     portfolio_evidence: Any = None,
     notes: list[str] | None = None,
@@ -2391,6 +2420,7 @@ def _persist(
         final_rating=rating,
         model_seconds=model_seconds,
         tool_seconds=tool_seconds,
+        runner_wall_seconds=runner_wall_seconds,
         infrastructure_error_count=infra_count,
         extrapolation_count=extrapolation_count,
         notes=_persistence_notes(
@@ -2681,8 +2711,7 @@ def default_adaptive_run_id(
         "native": "Native",
     }.get(harness.lower(), _display_name_component(harness) or "Harness")
     base = (
-        f"{timestamp.strftime('%m-%d-%Y')}-"
-        f"{_display_model_name(model)}-{harness_name}"
+        f"{timestamp.strftime('%m-%d-%Y')}-{_display_model_name(model)}-{harness_name}"
     )
     if collision:
         base += f"-{timestamp.strftime('%H-%M-%S')}"
