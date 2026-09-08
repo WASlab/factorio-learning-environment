@@ -30,6 +30,7 @@ _LIBRARY_ORDER = (
     "recipe_fluid_connection_mappings.lua",
     "serialize.lua",
     "serialize_direction_fix.lua",
+    "status_monitor.lua",
 )
 
 

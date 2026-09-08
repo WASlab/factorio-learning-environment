@@ -14,6 +14,7 @@ storage.actions.entity_census = function(player_index)
     local total = 0
     for _, entity in pairs(entities) do
         if entity.valid then
+            if storage.utils.track_public_status then storage.utils.track_public_status(entity) end
             local name = entity.name
             local status_name = "unknown"
             local ok, converted = pcall(function()
