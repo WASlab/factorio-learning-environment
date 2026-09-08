@@ -516,6 +516,11 @@ def evaluate_objective(
     elif objective.kind == "rocket_launch":
         baseline = float(initial.rocket_launches)
         value = float(final.rocket_launches)
+        evidence["source"] = "engine_force_rockets_launched"
+        if objective.parameters.get("since_task_start"):
+            evidence["baseline"] = baseline
+            value = max(value - baseline, 0.0)
+            baseline = 0.0
     elif objective.kind == "survival":
         baseline = 0.0
         value = float(final.tick - initial.tick)
@@ -1212,6 +1217,7 @@ def verify_native(
     initial: TelemetryFrame,
     customer_result: Any | None = None,
     precomputed_throughput_measurements: dict[str, list[float]] | None = None,
+    final_telemetry: TelemetryFrame | None = None,
 ) -> NativeVerificationResult:
     namespace = instance.first_namespace
     throughput_measurements: dict[str, list[float]] = dict(
@@ -1234,7 +1240,7 @@ def verify_native(
         throughput_measurements[objective.objective_id] = measurements
 
     targets = [objective.target for objective in task.objectives if objective.target]
-    final = capture_telemetry(instance, targets)
+    final = final_telemetry or capture_telemetry(instance, targets)
     objectives = [
         evaluate_objective(
             objective,
@@ -1307,6 +1313,12 @@ def verify_native(
     constraints_pass = all(
         result.supported and result.satisfied for result in constraints
     )
+    evaluation_progress = None
+    if task.evaluation_mode:
+        from fle.envd.evaluation_modes import progression_progress
+
+        evaluation_progress = progression_progress(task, initial, final)
+        success = success and evaluation_progress["success"]
     scalar = _scalarize(task, success, objectives, constraints_pass)
 
     produced = (
@@ -1330,6 +1342,8 @@ def verify_native(
     termination_reason = _termination_reason(
         task, success, objectives, constraints, action_events, initial, final
     )
+    if evaluation_progress and evaluation_progress["terminal_reason"]:
+        termination_reason = evaluation_progress["terminal_reason"]
     death_records = [
         CharacterDeath.model_validate(death)
         for death in final.deaths[len(initial.deaths) :]
@@ -1609,6 +1623,7 @@ def verify_native(
         ),
         metrics={
             **customer_metrics,
+            **({"evaluation_progress": evaluation_progress} if evaluation_progress else {}),
             "objective_evaluations": [
                 result.model_dump(mode="json") for result in objectives
             ],

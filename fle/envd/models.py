@@ -386,6 +386,7 @@ class FactorioTaskSpec(WireModel):
     backend_task_id: str | None = None
     goal: str
     task_family: TaskFamily = "throughput"
+    evaluation_mode: Literal["technology", "rocket_launch"] | None = None
     adaptive_contract_session: bool = Field(
         default=False,
         description=(
@@ -436,6 +437,36 @@ class FactorioTaskSpec(WireModel):
 
     @model_validator(mode="after")
     def validate_objectives(self) -> "FactorioTaskSpec":
+        if self.evaluation_mode:
+            if self.adaptive_contract_session or self.customer is not None:
+                raise ValueError("Progression modes cannot also be customer sessions")
+            if self.verifier.implementation != "objective_engine_v1":
+                raise ValueError(
+                    "Progression modes require the native objective verifier"
+                )
+            required = [
+                objective for objective in self.objectives if objective.required
+            ]
+            required_kind = (
+                "research" if self.evaluation_mode == "technology" else "rocket_launch"
+            )
+            if not required or any(
+                objective.kind != required_kind for objective in required
+            ):
+                raise ValueError(
+                    f"{self.evaluation_mode} requires {required_kind} goals"
+                )
+            if any(
+                objective.kind not in {"research", "rocket_launch"}
+                for objective in self.objectives
+            ):
+                raise ValueError(
+                    "Progression modes accept research and launch objectives"
+                )
+            if any(constraint.kind != "max_ticks" for constraint in self.constraints):
+                raise ValueError("Progression modes accept simulation budgets only")
+            self.max_interventions = None
+            self.holdout_seconds = 0
         objective_ids = [objective.objective_id for objective in self.objectives]
         if len(objective_ids) != len(set(objective_ids)):
             raise ValueError("Factorio objective ids must be unique within a task")
@@ -631,6 +662,7 @@ class ExecutionResult(WireModel):
     production_score: float
     automated_production_score: float
     state_hash: str
+    evaluation_progress: dict[str, Any] | None = None
     events: list["VerifierEvent"] = Field(default_factory=list)
     terminal_reason: str | None = None
 
@@ -658,6 +690,7 @@ class Observation(WireModel):
     delta: dict[str, Any] = Field(default_factory=dict)
     entities: dict[str, Any] = Field(default_factory=dict)
     research: dict[str, Any] = Field(default_factory=dict)
+    evaluation_progress: dict[str, Any] | None = None
     errors: dict[str, Any] = Field(default_factory=dict)
     contracts: list["OpenContractView"] = Field(default_factory=list)
     customer_depots: list[CustomerDepotView] = Field(default_factory=list)
