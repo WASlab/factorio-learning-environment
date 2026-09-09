@@ -1,5 +1,7 @@
 from fle.env.game_types import Prototype
 from fle.env.tools import Tool
+from fle.env.tools.agent.get_craft_plan.client import normalize_plan
+import json
 
 
 class QueueCraft(Tool):
@@ -13,5 +15,13 @@ class QueueCraft(Tool):
         if not isinstance(response, dict):
             raise Exception(
                 f"Could not queue {quantity}x {name}: {self.get_error_message(response)}"
+            )
+        if response.get("error"):
+            plan = normalize_plan(response["craft_plan"])
+            raise ValueError(
+                json.dumps(
+                    {"reason": response["reason"], "craft_plan": plan},
+                    separators=(",", ":"),
+                )
             )
         return self.clean_response(response)

@@ -31,6 +31,7 @@ _LIBRARY_ORDER = (
     "serialize.lua",
     "serialize_direction_fix.lua",
     "status_monitor.lua",
+    "crafting_menu.lua",
 )
 
 
