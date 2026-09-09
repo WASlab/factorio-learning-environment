@@ -165,33 +165,34 @@ def test_rejected_launch_does_not_increment_or_report_a_launch():
     tool.execute.assert_called_once_with(1, 10, 20)
 
 
-def test_wait_checks_native_research_flag_and_cooperates_with_cancellation():
+def test_wait_cancellation_cleans_engine_job_and_preserves_error():
     from fle.env.tools.agent.wait.client import Wait
 
     tool = Wait.__new__(Wait)
     tool.player_index = 1
-    tool.game_state = SimpleNamespace(_cancel_requested=False)
-    tool.execute = Mock(return_value=(False, 0))
-    met, observed = tool._check(
-        {"kind": "research", "technology": "automation-science-pack"}
+    tool.game_state = SimpleNamespace(
+        _cancel_requested=True, instance=SimpleNamespace(get_speed=lambda: 10)
     )
-    assert met is False
-    assert observed["researched"] is False
-    tool.execute.assert_called_once_with(0, 1, "automation-science-pack")
-    tool.game_state._cancel_requested = True
+    tool.execute = Mock(
+        side_effect=[
+            ({"start_tick": 0, "deadline_tick": 10}, 0),
+            RuntimeError("connection closed"),
+        ]
+    )
     with pytest.raises(TimeoutError, match="cancelled"):
-        tool._tick()
-    assert tool.execute.call_count == 1
+        tool(10)
+    tool.execute.assert_called_with("cancel", 1)
 
 
-def test_invalid_tick_keeps_transport_error_instead_of_int_dict_failure():
+def test_invalid_wait_start_preserves_transport_response():
     from fle.env.tools.agent.wait.client import Wait
 
     tool = Wait.__new__(Wait)
-    tool.game_state = SimpleNamespace()
+    tool.player_index = 1
+    tool.game_state = SimpleNamespace(instance=SimpleNamespace(get_speed=lambda: 10))
     tool.execute = Mock(return_value=({}, 0))
-    with pytest.raises(RuntimeError, match="Expected a native game tick"):
-        tool._tick()
+    with pytest.raises(RuntimeError, match="Could not start wait"):
+        tool(10)
 
 
 def test_score_scripts_do_not_replace_shared_serializer():

@@ -24,8 +24,8 @@ This checklist tracks integration and verification, not just tool definitions.
   reachability is established; never move to an unrequested destination.
 - [ ] Stateless crafting menu: required/available/missing ingredients, native
   craftability, bounded subrecipes, and the same information on queue failures.
-- [ ] Public production statistics, with bounded windows and optional rendering.
-- [ ] Event waits for public machine/production/research/order conditions, with
+- [x] Public production statistics, with bounded windows and optional rendering.
+- [x] Event waits for public machine/production/research/order conditions, with
   explicit tick bounds and auditable termination reasons.
 - [ ] Persistent objective presentation and completion of the existing selectable
   technology/rocket progression integration and workbench verification.
@@ -82,3 +82,23 @@ nearest reachable position. A different pathfinder resolution may retry the same
 goal, but a failed path does not move the character. Isolated Factorio 2.0.77
 validation covers a belt blocking a furnace, water under a furnace, unchanged
 inventory, and an exact water destination with unchanged character position.
+
+## Production and event waits
+
+The public statistics action reads native item/fluid totals and per-minute rates
+for bounded product lists and native 5/60/600/3600-second windows. It includes
+manual production, matching the player window, and exposes no verifier accounting.
+Production history queries also include these statistics; JSON is the authoritative
+view and no additional chart rendering cost is incurred by default.
+
+Wait conditions run on simulation ticks and retain the first sampled match.
+Machine status, inventory, research, crafting, production, accepted order delivery,
+and bounded public events are supported. Decisions stop at the requested deadline;
+Python transport latency is separately reported because simulation continues while
+the receipt travels. A removed referenced entity or invalid condition errors rather
+than appearing to satisfy the condition. Sampling cost scales with active waits.
+
+Isolated 2.0.77 validation covers furnace completion, exact deadline decisions,
+transport-latency reporting, and native production/consumption totals and rates.
+Lua tests cover transient condition retention and sampling between poll boundaries;
+Python tests cover validation, cancellation, and failure-preserving cleanup.
