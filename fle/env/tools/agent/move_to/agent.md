@@ -1,54 +1,21 @@
 # move_to
 
-The `move_to` tool allows you to navigate to specific positions in the Factorio world. This guide explains how to use it effectively.
-
-## Basic Usage
-
-```python
-move_to(position: Position) -> Position
-```
-
-The function returns your final Position after moving.
-
-### Parameters
-
-- `position`: Target Position to move to
-
-### Examples
+`move_to(position, stop_distance=0)` walks to the requested position and returns
+the actual final Position. The default goal remains exact (within the engine's
+small arrival tolerance). Occupied destinations are not silently replaced.
 
 ```python
-# Simple movement
-new_pos = move_to(Position(x=10, y=10))
-
-# Open resource tiles are reached exactly; occupied targets such as trees are approached
 coal_pos = nearest(Resource.Coal)
-move_to(coal_pos)
-
-# Interaction actions auto-approach, so explicit movement is normally unnecessary
-harvest_resource(coal_pos, quantity=10)
+move_to(coal_pos)  # Open resource ground is walkable.
+move_to(furnace.position, stop_distance=3)  # Explicit approach radius.
 ```
 
-## Movement Patterns
+Interaction actions auto-approach within their own reach, so separate movement
+is normally unnecessary before harvesting, inserting, or building. Avoid walking
+onto a planned building footprint before placing it.
 
-### 1. Resource Navigation
-
-```python
-move_to(nearest(Resource.IronOre))
-```
-
-### 2. Move before placing
-
-always need to move to the position where you need to place the entity
-
-```python
-move_to(Position(x = 0, y = 0))
-chest = place_entity(Prototypw.WoodenChest, position = Position(x = 0, y = 0))
-```
-
-## Troubleshooting
-
-1. "Cannot move"
-   - Verify destination is reachable (i.e not water)
-   - Ensure coordinates are valid
-   - Occupied targets resolve to the nearest walkable point in interaction range
-   - Use `stop_distance` to stop earlier, or call an interaction action directly
+Failed path searches report the requested goal, radius, and bounded collision
+context at the start and goal. Water tiles and overlapping entities are local
+evidence; the path may also be obstructed farther away. Failures do not move the
+character or return unverified reachable alternatives. Choose another destination
+or an explicit `stop_distance` after inspecting the failure.

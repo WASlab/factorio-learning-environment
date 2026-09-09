@@ -32,6 +32,7 @@ _LIBRARY_ORDER = (
     "serialize_direction_fix.lua",
     "status_monitor.lua",
     "crafting_menu.lua",
+    "spatial_diagnostics.lua",
 )
 
 

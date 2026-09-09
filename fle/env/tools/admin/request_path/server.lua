@@ -1,8 +1,3 @@
--- Store created entities globally
-if not storage.clearance_entities then
-    storage.clearance_entities = {}
-end
-
 storage.actions.request_path = function(player_index, start_x, start_y, goal_x, goal_y, radius, allow_paths_through_own_entities, entity_size, resolution)
     -- Ensure we have a valid character, recreating if necessary
     local player = storage.utils.ensure_valid_character(player_index)
@@ -17,23 +12,11 @@ storage.actions.request_path = function(player_index, start_x, start_y, goal_x, 
     local surface = player.surface
     local force = player.force
 
-    -- Define region for pipe checking (add some margin around start/goal)
-    local region = {
-        left_top = {
-            x = math.min(start_x, goal_x) - 10,
-            y = math.min(start_y, goal_y) - 10
-        },
-        right_bottom = {
-            x = math.max(start_x, goal_x) + 10,
-            y = math.max(start_y, goal_y) + 10
-        }
-    }
-
     -- Ensure chunks are generated along the path corridor from start to goal.
     -- The pathfinder cannot traverse ungenerated chunks, and needs a wide corridor
     -- to route around water, cliffs, and other obstacles.
     local corridor_radius = 5  -- ~160 tile wide corridor for pathfinding flexibility
-    local goal_radius = 8  -- Extra radius at goal for find_non_colliding_position search
+    local goal_radius = 8  -- Extra corridor coverage around the goal
     surface.request_to_generate_chunks({x = start_x, y = start_y}, corridor_radius)
     surface.request_to_generate_chunks({x = goal_x, y = goal_y}, goal_radius)
 
@@ -49,28 +32,8 @@ storage.actions.request_path = function(player_index, start_x, start_y, goal_x, 
     end
     surface.force_generate_chunk_requests()
 
-    rendering.draw_circle{only_in_alt_mode=true, width = 1, color = {r = 0.5, g = 0, b = 0.5}, surface = player.surface, radius = 0.303, filled = false, target = {x=start_x, y=start_y}, time_to_live = 12000}
-    rendering.draw_circle{only_in_alt_mode=true, width = 1, color = {r = 0, g = 0.5, b = 0.5}, surface = player.surface, radius = 0.303, filled = false, target = {x=goal_x, y=goal_y }, time_to_live = 12000}
-
-    -- Resolve an occupied destination to the closest position the character
-    -- can actually stand on. Open coordinates remain exact. This gives
-    -- move_to(entity.position) natural approach semantics without changing
-    -- the requested strategic destination or teleporting the character.
-    local clearance_entities = {}
-    local character_name = player.name or "character"
-    local approach_radius = math.max((player.resource_reach_distance or 2.5) - 0.25, 0.5)
     local goal_position = {x = goal_x, y = goal_y}
-    if not radius or radius <= 0.15 then
-        goal_position = player.surface.find_non_colliding_position(
-            character_name, goal_position, approach_radius, 0.25, true
-        )
-    end
-    if not goal_position then
-        -- Goal may be deep in water/obstacles; use raw coordinates and let the
-        -- pathfinder try with its radius parameter to get as close as possible
-        goal_position = {x = goal_x, y = goal_y}
-    end
-    
+
     local start_position = {y = start_y, x = start_x}
 
     local path_request = {
@@ -103,7 +66,6 @@ storage.actions.request_path = function(player_index, start_x, start_y, goal_x, 
     }
     local request_id = surface.request_path(path_request)
 
-    storage.clearance_entities[request_id] = clearance_entities
 
     if not storage.path_requests then
         storage.path_requests = {}
@@ -112,23 +74,13 @@ storage.actions.request_path = function(player_index, start_x, start_y, goal_x, 
         storage.paths = {}
     end
 
-    storage.path_requests[request_id] = player_index
+    storage.path_requests[request_id] = {player_index=player_index,
+        start=start_position, goal=goal_position, radius=radius or 0,
+        bounding_box=bounding_box, collision_mask=path_request.collision_mask,
+        surface_index=surface.index}
 
     return request_id
 end
-
--- Modify the pathfinding finished handler to clean up entities
---script.on_event(defines.events.on_script_path_request_finished, function(event)
---    -- Clean up clearance entities
---    if storage.clearance_entities[event.id] then
---        for _, entity in pairs(storage.clearance_entities[event.id]) do
---            if entity.valid then
---                entity.destroy()
---            end
---        end
---        storage.clearance_entities[event.id] = nil
---    end
---end)
 
 script.on_event(defines.events.on_script_path_request_finished, function(event)
     local request_data = storage.path_requests[event.id]

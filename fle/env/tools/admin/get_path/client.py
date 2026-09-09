@@ -1,9 +1,11 @@
+import json
 import os
 from time import sleep
 from typing import List
 
 from fle.env.entities import Position
 from fle.env.tools import Tool
+from fle.env.tools.spatial import normalize_spatial
 
 # Default budget: 120 backoff polls (~115s wall-clock) instead of 10 (~6.5s).
 # Long-distance move_to on fresh worlds has to wait for Factorio's
@@ -63,7 +65,9 @@ class GetPath(Tool):
                     return list_of_positions
 
                 elif status in ["not_found", "invalid_request"]:
-                    raise Exception(f"Path not found or invalid request: {status}")
+                    raise RuntimeError(
+                        json.dumps(normalize_spatial(path), sort_keys=True)
+                    )
                 elif status == "busy":
                     raise Exception("Pathfinder is busy, try again later")
 

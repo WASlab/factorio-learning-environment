@@ -1,4 +1,4 @@
-from time import sleep
+import json
 
 from fle.env.entities import Position, Entity
 from fle.env import DirectionInternal, Direction
@@ -6,6 +6,7 @@ from fle.env.game_types import Prototype
 from fle.env.tools.agent.get_entity.client import GetEntity
 from fle.env.tools.agent.pickup_entity.client import PickupEntity
 from fle.env.tools import Tool
+from fle.env.tools.spatial import normalize_spatial
 
 
 class PlaceObject(Tool):
@@ -47,6 +48,7 @@ class PlaceObject(Tool):
             raise ValueError("The second argument must be a Direction object")
 
         x, y = self.get_position(position)
+        self.ensure_reachable(position)
         try:
             name, metaclass = entity.value
             while isinstance(metaclass, tuple):
@@ -61,41 +63,16 @@ class PlaceObject(Tool):
             response, elapsed = self.execute(
                 self.player_index, name, factorio_direction, x, y, exact
             )
-        except Exception as e:
-            try:
-                msg = self.get_error_message(str(e))
-                raise Exception(f"Could not place {name} at ({x}, {y}), {msg}")
-            except Exception:
-                raise Exception(f"Could not place {name} at ({x}, {y})", e)
+        except Exception as error:
+            raise RuntimeError(
+                f"Could not place {name} at ({x}, {y}): {error}"
+            ) from error
 
-        # If we are in `slow` mode, there is a delay between placing the entity and the entity being created
-        if not self.game_state.instance.fast:
-            sleep(1)
-            return self.get_entity(entity, position)
-        else:
-            if not isinstance(response, dict):
-                try:
-                    msg = (
-                        str(response)
-                        .split(":")[-1]
-                        .replace('"', "")
-                        .replace("'", "")
-                        .strip()
-                    )
-                except:
-                    msg = str(response).lstrip()
-                raise Exception(f"Could not place {name} at ({x}, {y}), {msg}")
-
-            cleaned_response = self.clean_response(response)
-
-            try:
-                object = metaclass(
-                    prototype=entity.name, game=self.connection, **cleaned_response
-                )
-            except Exception as e:
-                raise Exception(
-                    f"Could not create {name} object from response (place entity): {cleaned_response}",
-                    e,
-                )
-
-            return object
+        if not isinstance(response, dict):
+            raise RuntimeError(f"Could not place {name} at ({x}, {y}): {response}")
+        if response.get("error"):
+            raise RuntimeError(json.dumps(normalize_spatial(response), sort_keys=True))
+        cleaned_response = self.clean_response(response)
+        return metaclass(
+            prototype=entity.name, game=self.connection, **cleaned_response
+        )

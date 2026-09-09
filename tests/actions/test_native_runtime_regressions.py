@@ -224,4 +224,4 @@ def test_path_approach_radius_stays_centered_on_requested_entity():
     assert lua.eval("captured.radius") == 5.5
     assert lua.eval("captured.bounding_box[1][1]") == -0.25
     lua.execute("storage.actions.request_path(1,0,0,10,20,0.15,false,nil,0)")
-    assert lua.eval("captured.goal.x") == 12
+    assert lua.eval("captured.goal.x") == 10

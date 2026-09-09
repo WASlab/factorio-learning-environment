@@ -1,0 +1,84 @@
+# Player observation parity implementation
+
+Status: in progress, 2026-09-08.
+
+The agent should receive public information comparable to a player looking at
+the factory, map, crafting menu, production statistics, and objective panel.
+These surfaces expose game facts, never hidden verifier state or build plans.
+This checklist tracks integration and verification, not just tool definitions.
+
+## Completion checklist
+
+- [ ] Passive status transitions: bounded lease journal, stable entity identity,
+  simulation ticks, observation revisions, severity, reconnect queries, and
+  execution receipts. Coalesce repeated samples per entity per simulation second.
+- [ ] Terrain context: bounded water, cliffs, trees, resources, occupancy, and
+  walkability summaries; coarse map detail at large radii.
+- [ ] Persistent camera: enabled by default, configurable radius and opt-out;
+  image context on model turns across supported harnesses and the workbench.
+- [ ] Nearby entity tooltips: bounded persistent contents, fuel, recipe, status,
+  and warnings in camera state. Keep full state separate from transition events.
+- [x] Exact placement diagnostics: identify blocking entities and terrain without
+  placing ghosts, selecting alternate builds, or changing placement semantics.
+- [x] Path diagnostics: explain failure and return alternatives only when their
+  reachability is established; never move to an unrequested destination.
+- [ ] Stateless crafting menu: required/available/missing ingredients, native
+  craftability, bounded subrecipes, and the same information on queue failures.
+- [ ] Public production statistics, with bounded windows and optional rendering.
+- [ ] Event waits for public machine/production/research/order conditions, with
+  explicit tick bounds and auditable termination reasons.
+- [ ] Persistent objective presentation and completion of the existing selectable
+  technology/rocket progression integration and workbench verification.
+- [ ] Focused tests, boundary tests, isolated live validation, documentation,
+  and coherent commits for each completed feature.
+
+## Design constraints
+
+Simulation time governs sampling and coalescing; observer wall time must not
+change replay. A transition feed cannot replace current entity state: reconnects
+need explicit retention boundaries and a current keyframe. Missing coverage must
+be reported rather than interpreted as a healthy factory. Sampling must scale
+with relevant entities and active workloads, without scanning the entire map
+every tick. Camera rendering must have bounded dimensions and entity detail.
+
+Failures provide facts and leave the next decision to the agent. A walkable tile
+is not necessarily reachable. Crafting arithmetic is a read surface; recursively
+planning a factory is outside it. Production and objective views must distinguish
+public game facts from evaluation-only evidence.
+
+## Status stream implementation
+
+The engine samples registered player machines every 60 simulation ticks, plus
+reads and serialization. Discovery reuses the existing census and new entity
+serialization. Its 4,096-sample ring crosses long interventions; envd publishes
+immutable, revision-anchored transitions in a 2,048-event journal. A publication
+coalesces each entity's changes within a simulation second, preserving observed
+statuses and peak severity. Changes shorter than the sampling interval can be
+missed. Coverage is explicit; this is not a per-tick event guarantee.
+
+Receipts prioritize up to 16 transitions. Observations and `query_state` with
+`kind='alerts'` expose bounded current status and retention/truncation metadata.
+An engine overrun replaces the comparison baseline with current state and marks
+the gap. New leases skip prior engine history. Checkpoints retain the published
+journal but rebaseline engine state because GameState reconstructs entities.
+Status ticks are absolute engine ticks; revisions belong to the lease.
+
+Validation: isolated Factorio 2.0.77 furnace transitions during one 300-tick wait,
+plus Lua/Python tests for ring overrun, removal, wire arrays, coalescing, immutable
+receipts, checkpoint serialization, revision queries, and transport failures.
+
+## Spatial failures
+
+Exact construction uses the engine's manual placement check, including offshore
+pumps. Failures preserve the requested position and expose a rotated footprint,
+up to 16 overlapping collision entities, up to 16 colliding tiles, and truncation
+metadata. Local collision context is evidence; specialized engine rules can
+reject a build even without a reported obstacle. Diagnostics do not create ghosts
+or consume inventory. The explicit planner-assisted ablation retains its search.
+
+Path requests retain their requested goal and explicit arrival radius. Failure
+reports include local start/goal collision context; they do not claim an untested
+nearest reachable position. A different pathfinder resolution may retry the same
+goal, but a failed path does not move the character. Isolated Factorio 2.0.77
+validation covers a belt blocking a furnace, water under a furnace, unchanged
+inventory, and an exact water destination with unchanged character position.
