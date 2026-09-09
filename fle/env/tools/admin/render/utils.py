@@ -182,7 +182,7 @@ def is_tree_entity(entity_name: str) -> bool:
 
 
 def is_rock_entity(entity_name: str) -> bool:
-    return "rock-" in entity_name
+    return "rock-" in entity_name or entity_name in {"big-rock", "huge-rock", "big-sand-rock"}
 
 
 def parse_blueprint(blueprint_string: str) -> Dict:

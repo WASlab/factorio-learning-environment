@@ -149,7 +149,7 @@ function analyze_cliff_orientation(entity, surface)
 end
 
 -- Modify the entity processing section in storage.actions.render
-storage.actions.render = function(player_index, include_status, radius, compression_level)
+storage.actions.render = function(player_index, include_status, radius, compression_level, center_x, center_y)
     local player = storage.agent_characters[player_index]
     if not player then
         return nil, "Player not found"
@@ -158,7 +158,10 @@ storage.actions.render = function(player_index, include_status, radius, compress
     compression_level = compression_level or "standard"
 
     local surface = player.surface
-    local player_position = player.position
+    local player_position = {
+        x = center_x or player.position.x,
+        y = center_y or player.position.y
+    }
     local MARGIN = 0
     -- Define search area around player
     local area = {

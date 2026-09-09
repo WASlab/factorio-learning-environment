@@ -50,6 +50,11 @@ class DecorativeSpriteExtractor:
                         )
 
                     sprite.save(output_path)
+                    if prefix == "hr-" and not sprite_path.with_name(sprite_path.name.removeprefix("hr-")).exists():
+                        sprite.resize(
+                            (max(1, sprite.width // 2), max(1, sprite.height // 2)),
+                            Image.Resampling.LANCZOS,
+                        ).save(self.output_dir / f"{decorative_name}_{variant}.png")
                     print(f"Saved: {output_path}")
 
                 except Exception as e:

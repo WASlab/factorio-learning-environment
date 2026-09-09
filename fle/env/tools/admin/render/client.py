@@ -19,11 +19,18 @@ class Render(Tool):
         self.get_entities = GetEntities(*args)
 
     @profile_method(include_args=True)
-    def _get_map_entities(self, include_status, radius, compression_level):
+    def _get_map_entities(
+        self, include_status, radius, compression_level, position=None
+    ):
         # Execute the Lua function with compression level
         try:
             result, _ = self.execute(
-                self.player_index, include_status, radius, compression_level
+                self.player_index,
+                include_status,
+                radius,
+                compression_level,
+                position.x if position is not None else None,
+                position.y if position is not None else None,
             )
 
             # Decode the optimized format if necessary
@@ -32,7 +39,12 @@ class Render(Tool):
             return decoded_result
         except Exception:
             result, _ = self.execute(
-                self.player_index, include_status, radius, compression_level
+                self.player_index,
+                include_status,
+                radius,
+                compression_level,
+                position.x if position is not None else None,
+                position.y if position is not None else None,
             )
             pass
 
@@ -47,6 +59,7 @@ class Render(Tool):
         blueprint: Union[str, List[Dict]] = None,
         return_renderer=False,
         max_render_radius: Optional[float] = 32,
+        camera_entities: Optional[List[Dict]] = None,
     ) -> Union[RenderedImage, Tuple[RenderedImage, Renderer]]:
         """
         Returns information about all entities, tiles, and resources within the specified radius of the player.
@@ -73,7 +86,8 @@ class Render(Tool):
         if not blueprint:
             # Create renderer with decoded data
             renderer = self.get_renderer_from_map(
-                include_status, radius, compression_level, max_render_radius, position
+                include_status, radius, compression_level, max_render_radius, position,
+                camera_entities,
             )
         else:
             renderer = self.get_renderer_from_blueprint(blueprint)
@@ -153,8 +167,11 @@ class Render(Tool):
         compression_level: str = "binary",
         max_render_radius: Optional[float] = None,
         position: Optional[Position] = None,
+        camera_entities: Optional[List[Dict]] = None,
     ) -> Renderer:
-        result = self._get_map_entities(include_status, radius, compression_level)
+        result = self._get_map_entities(
+            include_status, radius, compression_level, position
+        )
 
         # Parse the Lua dictionaries
         entities = self.parse_lua_dict(result["entities"])
@@ -166,7 +183,10 @@ class Render(Tool):
 
         if not position:
             position = Position(character_position[0]["x"], character_position[0]["y"])
-        ent = self.get_entities(position=position, radius=radius)
+        ent = (
+            camera_entities if camera_entities is not None
+            else self.get_entities(position=position, radius=radius)
+        )
         if ent:
             entities.extend(ent)
             pass
@@ -182,6 +202,7 @@ class Render(Tool):
             water_tiles=water_tiles,
             resources=resources,
             max_render_radius=max_render_radius,
+            center_position={"x": position.x, "y": position.y},
         )
         return renderer
 

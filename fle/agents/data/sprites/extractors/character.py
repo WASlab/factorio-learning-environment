@@ -169,6 +169,12 @@ class CharacterSpriteExtractor:
                         output_path = self.output_dir / output_name
 
                     sprite.save(output_path)
+                    # HR-only distributions still need canonical 32px/tile sprites.
+                    if is_hr and not sheet_path.with_name(sheet_path.name.removeprefix("hr-")).exists():
+                        sprite.resize(
+                            (max(1, sprite.width // 2), max(1, sprite.height // 2)),
+                            Image.Resampling.LANCZOS,
+                        ).save(self.output_dir / output_name)
                     extracted_count += 1
 
             print(
@@ -208,7 +214,10 @@ class CharacterSpriteExtractor:
         # Categorize files
         for file_path in png_files:
             filename = file_path.name
-            file_path.stem.replace("hr-", "")
+            clean_name = file_path.stem.removeprefix("hr-")
+            if not clean_name.startswith(("level1_", "level2addon_", "level3addon_")):
+                # Reflections and footprints are not character animation sheets.
+                continue
 
             if "_mask" in filename:
                 file_groups["masks"].append(file_path)

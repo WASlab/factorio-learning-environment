@@ -60,6 +60,7 @@ class Renderer:
         sprites_dir: Optional[Path] = None,
         max_render_radius: Optional[float] = None,
         center_on_player: bool = True,
+        center_position: Optional[Dict[str, float]] = None,
     ):
         """Initialize renderer with blueprint data.
 
@@ -78,8 +79,8 @@ class Renderer:
         flattened_entities = list(flatten_entities(entities))
 
         # Find player position if centering on player
-        self.player_position = None
-        if center_on_player:
+        self.player_position = center_position
+        if center_on_player and self.player_position is None:
             for entity in flattened_entities:
                 if isinstance(entity, dict) and entity.get("name") == "character":
                     pos = entity.get("position", {})
@@ -270,6 +271,9 @@ class Renderer:
 
         for entity in entities:
             # Handle both Entity objects and dicts
+            name = entity.get("name", "") if isinstance(entity, dict) else entity.name
+            if name == "character" or is_tree_entity(name) or is_rock_entity(name) or name == "cliff" or name.startswith("crash-site-"):
+                continue
             if hasattr(entity, "status"):
                 status = entity.status
                 entity_dict = (
@@ -874,7 +878,8 @@ class Renderer:
                 pos["x"], pos["y"], max_variants=DEFAULT_ROCK_VARIANTS
             )
 
-            sprite_name = f"{decorative['name']}_{variant}"
+            asset_name = {"big-rock": "rock-big", "huge-rock": "rock-huge", "big-sand-rock": "sand-rock"}.get(decorative["name"], decorative["name"])
+            sprite_name = f"{asset_name}_{variant}"
             image = image_resolver(sprite_name, False)
 
             if image:
@@ -882,7 +887,7 @@ class Renderer:
             else:
                 while not image and variant < DEFAULT_ROCK_VARIANTS:
                     variant = variant + 1
-                    sprite_name = f"{decorative['name']}_{variant}"
+                    sprite_name = f"{asset_name}_{variant}"
                     image = image_resolver(sprite_name, False)
                     if image:
                         self._paste_image(img, image, relative_x, relative_y, scaling)
@@ -1126,6 +1131,14 @@ class Renderer:
 
             if image:
                 self._paste_image(img, image, relative_x, relative_y, scaling)
+            else:
+                # Missing artwork must not make a real obstacle invisible.
+                # A labelled position marker carries only grounded entity facts.
+                x, y = relative_x * scaling, relative_y * scaling
+                draw = ImageDraw.Draw(img)
+                draw.line((x-4,y,x+4,y),fill="#e0ca9b",width=2)
+                draw.line((x,y-4,x,y+4),fill="#e0ca9b",width=2)
+                draw.text((x+5,y+4),entity.name,fill="#e0ca9b")
 
     @profile_method()
     def _paste_image(

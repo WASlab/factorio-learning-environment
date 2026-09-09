@@ -193,7 +193,12 @@ class BasisImageResolver:
                 temp_path = Path(temp_dir)
 
                 # Run basisu transcoder
-                cmd = ["basisu", "-unpack", str(basis_path)]
+                # The transcoder runs in an isolated temporary directory so its
+                # generated files do not pollute the source tree. Resolve the
+                # input before changing cwd; a relative path would otherwise be
+                # interpreted beneath that temporary directory and every
+                # transcode would fail as "file not found".
+                cmd = ["basisu", "-unpack", str(basis_path.resolve())]
                 result = subprocess.run(
                     cmd, cwd=temp_path, capture_output=True, text=True
                 )

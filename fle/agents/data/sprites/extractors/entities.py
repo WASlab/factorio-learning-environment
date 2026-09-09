@@ -81,7 +81,12 @@ class EntitySpritesheetExtractor:
     def _load_basis_file(self, basis_path: Path) -> Image.Image:
         """Load a basis file, transcoding if necessary"""
         # Check cache first
-        cache_key = str(basis_path).replace("/", "_").replace(".basis", "")
+        cache_key = (
+            str(basis_path)
+            .replace("/", "_")
+            .replace("\\", "_")
+            .removesuffix(".basis")
+        )
         cached_png = self.cache_dir / f"{cache_key}.png"
 
         if not cached_png.exists():
@@ -108,7 +113,9 @@ class EntitySpritesheetExtractor:
                 temp_path = Path(temp_dir)
 
                 # Run basisu transcoder
-                cmd = ["basisu", "-unpack", str(basis_path)]
+                # basisu executes from the temporary output directory, so the
+                # source path must be absolute.
+                cmd = ["basisu", "-unpack", str(basis_path.resolve())]
                 result = subprocess.run(
                     cmd, cwd=temp_path, capture_output=True, text=True
                 )
@@ -137,6 +144,7 @@ class EntitySpritesheetExtractor:
                     return False
 
                 # Copy to output location
+                output_path.parent.mkdir(parents=True, exist_ok=True)
                 shutil.copy2(generated_png, output_path)
                 return True
 
@@ -1484,11 +1492,8 @@ class EntitySpritesheetExtractor:
             # if category_name in ['recipe', 'item']:
             #     continue
 
-            # Check flags more strictly to match JavaScript
-            if flags and (
-                "player-creation" not in flags or "placeable-off-grid" in flags
-            ):
-                continue
+            # Neutral obstacles and crash-site containers are visible map
+            # entities too. Ownership/buildability does not determine artwork.
 
             print(f"Processing {entity_name}...")
             try:
