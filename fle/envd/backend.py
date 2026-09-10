@@ -84,7 +84,12 @@ from fle.envd.objective_engine import (
 )
 from fle.envd.perturbations import PerturbationEngine
 from fle.envd.status_journal import StatusJournal
-from fle.envd.camera import CameraSettings, compact_terrain, render_coarse_map
+from fle.envd.camera import (
+    CameraSettings,
+    compact_terrain,
+    normalize_render_direction,
+    render_coarse_map,
+)
 from fle.eval.tasks import TaskFactory
 
 
@@ -3150,10 +3155,19 @@ class FLEWorker(FactorioWorker):
                         image_bytes=len(png),
                     )
                 else:
+                    camera_entities = [
+                        {
+                            **entity,
+                            "direction": normalize_render_direction(
+                                entity.get("direction")
+                            ),
+                        }
+                        for entity in view.get("entities", [])
+                    ]
                     rendered = self.render_factory(
                         lease_id,
                         radius=current.radius,
-                        camera_entities=view.get("entities", []),
+                        camera_entities=camera_entities,
                     )
                     result.update(
                         {
@@ -3168,7 +3182,7 @@ class FLEWorker(FactorioWorker):
                         }
                     )
             except Exception as exc:
-                result["image_error"] = str(exc)[:300]
+                result["image_error"] = f"{type(exc).__name__}: {exc}"[:300]
         return result
 
     def render_factory(

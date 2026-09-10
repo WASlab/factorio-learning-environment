@@ -20,6 +20,30 @@ class CameraSettings(BaseModel):
     entity_limit: int = Field(default=32, ge=1, le=128)
 
 
+CARDINAL_RENDER_DIRECTIONS = (0, 4, 8, 12)
+
+
+def normalize_render_direction(value: Any) -> int:
+    """Map any Factorio direction encoding to a cardinal renderer key.
+
+    Renderers ship four cardinal sprites keyed by Factorio 2.0 values
+    (0/4/8/12). Entity payloads can carry legacy 8-direction values (0-7) or
+    diagonal 16-direction values (2/6/10/14), which previously crashed the
+    whole camera image. Non-cardinal values snap to the nearest cardinal.
+    """
+
+    try:
+        direction = int(round(float(value)))
+    except (TypeError, ValueError):
+        return 0
+    if direction in CARDINAL_RENDER_DIRECTIONS:
+        return direction
+    if 0 <= direction <= 7:  # legacy 8-direction encoding
+        direction = (direction * 2) % 16
+    direction %= 16
+    return ((direction + 2) // 4 * 4) % 16
+
+
 def persist_camera_snapshot(directory: Path, payload: dict[str, Any]) -> dict[str, Any]:
     """Publish one atomic latest view and deduplicate its immutable PNG asset."""
     result = dict(payload)

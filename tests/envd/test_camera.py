@@ -9,7 +9,12 @@ from fastapi.testclient import TestClient
 
 from fle.envd.api import create_app
 from fle.envd.backend import FLEWorker
-from fle.envd.camera import compact_terrain, persist_camera_snapshot, render_coarse_map
+from fle.envd.camera import (
+    compact_terrain,
+    normalize_render_direction,
+    persist_camera_snapshot,
+    render_coarse_map,
+)
 from fle.envd.service import EnvironmentService
 from scripts import factorio_codex_mcp as mcp
 from tests.envd.conftest import FakeWorker
@@ -90,6 +95,47 @@ def test_camera_opt_out_persists_and_wide_view_avoids_detailed_renderer():
     assert reader.call_count == 1
     with pytest.raises(ValueError):
         worker.camera("lease", settings={"radius": 1000})
+
+
+def test_render_direction_normalization_accepts_every_encoding():
+    assert normalize_render_direction(0) == 0
+    assert normalize_render_direction(4) == 4
+    assert normalize_render_direction(12.0) == 12
+    assert normalize_render_direction(2) == 4
+    assert normalize_render_direction(6) == 12
+    assert normalize_render_direction(14) == 0
+    assert normalize_render_direction(None) == 0
+    assert normalize_render_direction("junk") == 0
+
+
+def test_camera_normalizes_entity_directions_before_rendering():
+    worker = FLEWorker.__new__(FLEWorker)
+    raw = view()
+    raw["entities"] = [
+        {"name": "burner-mining-drill", "direction": 2.0},
+        {"name": "character", "direction": 6},
+        {"name": "stone-furnace", "direction": 0},
+    ]
+    worker.instance = SimpleNamespace(
+        first_namespace=SimpleNamespace(_public_view=Mock(return_value=raw))
+    )
+    captured: dict = {}
+
+    def fake_render(lease, **kwargs):
+        captured.update(kwargs)
+        return {
+            "image_base64": base64.b64encode(b"\x89PNG").decode(),
+            "media_type": "image/png",
+            "image_sha256": "x",
+            "image_bytes": 4,
+            "viewport": {},
+        }
+
+    worker.render_factory = fake_render
+    result = worker.camera("lease")
+    directions = [entity["direction"] for entity in captured["camera_entities"]]
+    assert directions == [4, 12, 0]
+    assert "image_error" not in result
 
 
 def test_camera_api_validates_bounds_and_forwards_partial_settings(task_spec):
