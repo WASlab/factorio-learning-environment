@@ -43,6 +43,7 @@ api_keys.json
 *.log
 *.trace
 *.jsonl
+!data/recipes/recipes.jsonl
 
 # Database
 .fle/

@@ -9,9 +9,10 @@ import os
 import json
 from typing import List, Tuple
 from concurrent import futures
-from unittest.mock import MagicMock
+from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
+import pytest_asyncio
 from PIL import Image as PILImage
 
 # Skip all tests in this module if fastmcp is not installed
@@ -91,7 +92,7 @@ class TestMCPResources:
         with futures.ThreadPoolExecutor() as executor:
             return list(executor.map(init_instance, zip(ips, udp_ports, tcp_ports)))
 
-    @pytest.fixture(autouse=True)
+    @pytest_asyncio.fixture(autouse=True)
     async def setup_state(self):
         """Setup state before each test"""
         # Initialize state with test instance
@@ -252,7 +253,7 @@ class TestMCPResources:
 
             # Create resource with recipe name
             resource = await recipe.create_resource(
-                "fle://recipe/", {"name": test_recipe_name}
+                "fle://recipe/", {"prototype": test_recipe_name}
             )
 
             result = await resource.read()
@@ -270,7 +271,7 @@ class TestMCPResources:
 
         # Test with non-existent recipe
         invalid_resource = await recipe.create_resource(
-            "fle://recipe/", {"name": "non_existent_recipe_xyz"}
+            "fle://recipe/", {"prototype": "non_existent_recipe_xyz"}
         )
         result_invalid = await invalid_resource.read()
         assert result_invalid is not None
@@ -346,22 +347,27 @@ class TestMCPResources:
         # Clear state to simulate no connection
         state.active_server = None
 
-        # Test inventory resource
-        inv_resource = inventory  # .create_resource('fle://inventory', {})
-        with pytest.raises(Exception, match="No active Factorio server connection"):
-            await inv_resource.read()
+        with patch(
+            "fle.env.protocols._mcp.resources.initialize_session",
+            new=AsyncMock(return_value=None),
+        ):
+            # Test inventory resource
+            inv_resource = inventory  # .create_resource('fle://inventory', {})
+            with pytest.raises(Exception, match="No active Factorio server connection"):
+                await inv_resource.read()
 
-        # Test position resource
-        pos_resource = position  # .create_resource('fle://position', {})
-        with pytest.raises(Exception, match="No active Factorio server connection"):
-            await pos_resource.read()
+            # Test position resource
+            pos_resource = position  # .create_resource('fle://position', {})
+            with pytest.raises(Exception, match="No active Factorio server connection"):
+                await pos_resource.read()
 
-        # Test entities resource
-        ent_resource = await entities.create_resource(
-            "fle://entities/", {"center_x": "0", "center_y": "0", "radius": "100"}
-        )
-        with pytest.raises(Exception, match="No active Factorio server connection"):
-            await ent_resource.read()
+            # Test entities resource
+            ent_resource = await entities.create_resource(
+                "fle://entities/",
+                {"center_x": "0", "center_y": "0", "radius": "100"},
+            )
+            with pytest.raises(Exception, match="No active Factorio server connection"):
+                await ent_resource.read()
 
     @pytest.mark.asyncio
     async def test_entities_parameter_conversion(self):
@@ -422,7 +428,9 @@ class TestMCPResources:
             # Sample a few recipes and verify they can be retrieved
             sample_names = names[:5]
             for name in sample_names:
-                resource = await recipe.create_resource("fle://recipe/", {"name": name})
+                resource = await recipe.create_resource(
+                    "fle://recipe/", {"prototype": name}
+                )
                 result = await resource.read()
                 assert result is not None
                 assert "not found" not in result
@@ -446,9 +454,10 @@ class TestMCPResources:
         ]
 
         for resource_template, uri, expected_type in no_param_resources:
-            resource = await resource_template.create_resource(uri, {})
-            result = await resource.read()
+            result = await resource_template.read()
             assert result is not None
+            if expected_type in (dict, list) and isinstance(result, str):
+                result = json.loads(result)
             assert isinstance(result, expected_type), (
                 f"{resource_template} should return {expected_type}, got {type(result)}"
             )
@@ -463,6 +472,8 @@ class TestMCPResources:
             "fle://entities/", {"center_x": "0", "center_y": "0", "radius": "100"}
         )
         entities_result = await entities_resource.read()
+        if isinstance(entities_result, str):
+            entities_result = json.loads(entities_result)
         assert isinstance(entities_result, list)
 
         # Test render with path params
@@ -473,11 +484,10 @@ class TestMCPResources:
         assert render_result is not None
 
         # Test recipe with path param
-        names_resource = await prototypes.create_resource("fle://prototypes", {})
-        names = await names_resource.read()
+        names = json.loads(await prototypes.read())
         if names:
             recipe_resource = await recipe.create_resource(
-                "fle://recipe/", {"name": names[0]}
+                "fle://recipe/", {"prototype": names[0]}
             )
             recipe_result = await recipe_resource.read()
             assert isinstance(recipe_result, str)

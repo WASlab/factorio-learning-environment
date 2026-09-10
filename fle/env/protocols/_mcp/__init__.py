@@ -8,11 +8,14 @@ from dataclasses import dataclass
 try:
     from fastmcp import FastMCP
 
-    # Create the MCP server instance FIRST
-    mcp = FastMCP(
-        "Factorio Learning Environment",
-        dependencies=["dulwich", "numpy", "pillow"],
-    )
+    # `dependencies` was removed in fastmcp 2.10+; keep it when supported.
+    try:
+        mcp = FastMCP(
+            "Factorio Learning Environment",
+            dependencies=["dulwich", "numpy", "pillow"],
+        )
+    except TypeError:
+        mcp = FastMCP("Factorio Learning Environment")
     _FASTMCP_AVAILABLE = True
 except ImportError:
     mcp = None

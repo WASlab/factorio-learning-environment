@@ -100,6 +100,7 @@ all = [
 mcp = [
     "mcp[cli]",
     "dulwich",
+    "fastmcp>=2.0,<3",
 ]
 env = [
     "anyio",

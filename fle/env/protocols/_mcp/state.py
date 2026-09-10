@@ -1,4 +1,5 @@
 import json
+import os
 import time
 from pathlib import Path
 from typing import Dict, List, Optional, Any
@@ -258,15 +259,17 @@ class FactorioMCPState:
         if self.recipes_loaded:
             return self.recipes
 
-        recipes_path = (
-            Path(__file__).parent.parent / "data" / "recipes" / "recipes.jsonl"
-        )
+        candidates = []
+        override = os.environ.get("FLE_RECIPES_PATH")
+        if override:
+            candidates.append(Path(override))
+        here = Path(__file__).resolve()
+        for parent in here.parents:
+            candidates.append(parent / "data" / "recipes" / "recipes.jsonl")
 
-        if not recipes_path.exists():
-            # Fall back to absolute path if relative path fails
-            recipes_path = Path(
-                "/Users/jackhopkins/PycharmProjects/PaperclipMaximiser/data/recipes/recipes.jsonl"
-            )
+        recipes_path = next(
+            (path for path in candidates if path.exists()), candidates[0]
+        )
 
         try:
             recipes = {}
