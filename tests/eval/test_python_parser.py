@@ -2,6 +2,8 @@ import pytest
 from typing import NamedTuple
 from fle.agents.llm.parsing import PythonParser
 
+pytestmark = pytest.mark.no_factorio
+
 
 class MockMessage(NamedTuple):
     content: str

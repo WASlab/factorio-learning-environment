@@ -9,6 +9,8 @@ from fle.env.action_queue import (
     submit_queue,
 )
 
+pytestmark = pytest.mark.no_factorio
+
 
 class _Rcon:
     def __init__(self):

@@ -142,8 +142,10 @@ packages = ["fle", "factorio_v1"]
 pythonpath = "fle/env"
 testpaths = "tests"
 python_files = "test_*.py"
+addopts = "-m 'not factorio_live'"
 markers = [
     "no_factorio: unit or contract test that does not require a live Factorio server",
+    "factorio_live: test requires a live Factorio server (auto-applied to tests using the instance fixture)",
 ]
 
 [project.urls]

@@ -7,6 +7,9 @@ from fle.agents.formatters.recursive_formatter import RecursiveFormatter
 from fle.commons.models.conversation import Conversation
 from fle.commons.models.message import Message
 from fle.agents.llm.api_factory import APIFactory
+import pytest
+
+pytestmark = pytest.mark.no_factorio
 
 
 class TestRecursiveFormatter(unittest.TestCase):
@@ -59,11 +62,13 @@ class TestRecursiveFormatter(unittest.TestCase):
 
         chunk_hash = self.formatter._get_chunk_hash(messages)
         summary = Message(
-            role="assistant", content="Summary content", metadata={"summarized": True}
+            role="assistant",
+            content="Summary content",
+            metadata={"summarized": True, "summary_range": "[1-2]"},
         )
 
         # Save to cache
-        self.formatter._save_summary_cache(chunk_hash, summary, 1, 2)
+        self.formatter._save_summary_cache(chunk_hash, summary)
 
         # Load from cache
         loaded_summary = self.formatter._load_cached_summary(chunk_hash)
@@ -132,10 +137,14 @@ class TestRecursiveFormatter(unittest.TestCase):
             # Should handle cache write failure gracefully
             messages = [Message(role="user", content="Test")]
             chunk_hash = self.formatter._get_chunk_hash(messages)
-            summary = Message(role="assistant", content="Summary")
+            summary = Message(
+                role="assistant",
+                content="Summary",
+                metadata={"summary_range": "[1-1]"},
+            )
 
             # Should not raise exception
-            self.formatter._save_summary_cache(chunk_hash, summary, 1, 1)
+            self.formatter._save_summary_cache(chunk_hash, summary)
 
             # Should return None on cache read failure
             loaded = self.formatter._load_cached_summary(chunk_hash)

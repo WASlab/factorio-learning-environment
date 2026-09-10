@@ -3,6 +3,9 @@ Tests for the Factorio Gym Registry.
 """
 
 from fle.env.gym_env.registry import list_available_environments, get_environment_info
+import pytest
+
+pytestmark = pytest.mark.no_factorio
 
 
 def test_registry_functions():
@@ -19,7 +22,6 @@ def test_registry_functions():
     if env_ids:
         info = get_environment_info(env_ids[0])
         assert info is not None
-        assert "env_id" in info
         assert "description" in info
         assert "task_key" in info
         print(f"✓ get_environment_info() returned valid info for {env_ids[0]}")

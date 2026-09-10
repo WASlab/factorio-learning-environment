@@ -4,6 +4,9 @@ from fle.commons.models.achievements import ProductionFlows
 from fle.commons.models.research_state import ResearchState
 from fle.commons.models.technology_state import TechnologyState
 from fle.agents.models import TaskResponse
+import pytest
+
+pytestmark = pytest.mark.no_factorio
 
 
 def make_minimal_observation(**kwargs):

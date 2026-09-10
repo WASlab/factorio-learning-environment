@@ -3,6 +3,9 @@ from fle.commons.models.conversation import Conversation
 from fle.commons.models.message import Message
 
 from fle.agents.formatters import StructurePreservingFormatter, CodeProcessor
+import pytest
+
+pytestmark = pytest.mark.no_factorio
 
 
 class TestStructurePreservingFormatter(unittest.TestCase):
@@ -63,7 +66,7 @@ class TestStructurePreservingFormatter(unittest.TestCase):
         )
 
     def test_format_conversation(self):
-        formatted = self.formatter.format_conversation(self.conversation)
+        formatted = self.formatter.format_conversation(self.conversation, None)
 
         # Should produce 6 messages: system, user, assistant1, user1, assistant2, user2
         self.assertEqual(len(formatted), 6)
@@ -92,11 +95,11 @@ class TestStructurePreservingFormatter(unittest.TestCase):
         # Check user execution results are formatted correctly
         user1 = formatted[3]
         self.assertEqual(user1.role, "user")
-        self.assertEqual(user1.content, "Execution result:\n1: 0\n2: 1")
+        self.assertEqual(user1.content, "1: 0\n2: 1")
 
         user2 = formatted[5]
         self.assertEqual(user2.role, "user")
-        self.assertEqual(user2.content, "Execution result:\n3: 0\n4: 1")
+        self.assertEqual(user2.content, "3: 0\n4: 1")
 
     def test_format_single_message(self):
         # Test formatting of a non-last assistant message

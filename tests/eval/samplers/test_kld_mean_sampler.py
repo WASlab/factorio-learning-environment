@@ -7,6 +7,9 @@ from psycopg2.extras import DictRow
 
 from fle.commons.models.program import Program
 from fle.eval.algorithms.mcts import KLDiversityAchievementSampler
+import pytest
+
+pytestmark = pytest.mark.no_factorio
 
 
 class TestKLDiversityAchievementSampler(unittest.TestCase):

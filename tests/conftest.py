@@ -199,3 +199,18 @@ def configure_game(instance):
         return instance.namespace
 
     return _configure_game
+
+
+def pytest_collection_modifyitems(items):
+    """Auto-mark tests that require the live `instance` fixture.
+
+    The autouse `_reset_between_tests` fixture connects to Factorio for every
+    test unless it carries the `no_factorio` marker, so an unmarked test is
+    live by construction. Keeps `uv run pytest` server-free by default
+    (addopts deselects `factorio_live`); live runs use `-m factorio_live`.
+    """
+
+    for item in items:
+        if "factorio_live" in item.keywords or "no_factorio" in item.keywords:
+            continue
+        item.add_marker(pytest.mark.factorio_live)

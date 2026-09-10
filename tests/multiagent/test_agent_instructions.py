@@ -2,6 +2,8 @@ import pytest
 from examples.agents.basic_agent import BasicAgent
 from fle.eval.tasks import UnboundedThroughputTask
 
+pytestmark = pytest.mark.no_factorio
+
 
 def test_basic_agent_instructions():
     """Test that agent instructions are properly incorporated into BasicAgent system prompts"""

@@ -2,6 +2,9 @@ import unittest
 from unittest.mock import Mock
 
 from fle.eval.algorithms.mcts.samplers import DynamicRewardWeightedSampler
+import pytest
+
+pytestmark = pytest.mark.no_factorio
 
 
 class TestWeightedRewardSampler(unittest.TestCase):
