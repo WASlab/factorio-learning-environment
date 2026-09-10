@@ -16,6 +16,14 @@ from fle.envd.backend import (
     _intervention_reward_delta,
 )
 from fle.envd.customer import ActiveOrder
+from fle.envd.delivery import (
+    build_delivery_receipt,
+    build_delivery_telemetry,
+    parse_customer_depots,
+    parse_delivery_buckets,
+    record_delivery_samples,
+    record_manual_delivery_samples,
+)
 from fle.envd.errors import (
     CommitmentMismatch,
     EpochAlreadyActive,
@@ -367,18 +375,14 @@ def test_adaptive_depot_placement_requires_explicit_task_marker():
 
 @UNIT
 def test_customer_depot_metadata_and_delivery_receipts_are_unambiguous():
-    worker = FLEWorker.__new__(FLEWorker)
-    worker.customer_engine = None
-    worker._active_order = ActiveOrder(
+    order = ActiveOrder(
         "steel-plate",
         100,
         3600,
         activation_tick=0,
         order_kind="sustained",
     )
-    worker._throughput_audit_result = None
-    worker._customer_depots_cache = []
-    worker._cache_customer_depots(
+    depots = parse_customer_depots(
         {
             "depots": {
                 1: {
@@ -392,13 +396,24 @@ def test_customer_depot_metadata_and_delivery_receipts_are_unambiguous():
         }
     )
 
-    depot = worker._customer_depots_cache[0]
+    depot = depots[0]
     assert depot.depot_id == "customer-depot-42"
     assert depot.position == {"x": -5.5, "y": -9.5}
     assert depot.customer_owned is True
     assert depot.consumes_deliveries is True
 
-    missed = worker._delivery_receipt(["insert_item"], {})
+    def receipt(attempted: bool, delivered_before: dict) -> object:
+        return build_delivery_receipt(
+            contracts=[order.student_view()],
+            attempted_insert=attempted,
+            delivered_before=delivered_before,
+            throughput_audit_passed=False,
+            customer_depot_ids=[d.depot_id for d in depots],
+            contract_delivery_baseline={},
+            delivery_raw_totals={},
+        )
+
+    missed = receipt(True, {})
     assert missed is not None
     assert missed.credited == {}
     assert missed.remaining == {"steel-plate": 100.0}
@@ -407,8 +422,8 @@ def test_customer_depot_metadata_and_delivery_receipts_are_unambiguous():
     assert missed.qualification_pending is True
     assert missed.throughput_certified is False
 
-    worker._active_order.attribute(40.0, 60)
-    credited = worker._delivery_receipt(["insert_item"], {})
+    order.attribute(40.0, 60)
+    credited = receipt(True, {})
     assert credited is not None
     assert credited.credited == {"steel-plate": 40.0}
     assert credited.remaining == {"steel-plate": 60.0}
@@ -416,16 +431,14 @@ def test_customer_depot_metadata_and_delivery_receipts_are_unambiguous():
     assert credited.delivery_mode == "inserter_fed"
     assert credited.qualification_pending is True
 
-    automated = worker._delivery_receipt(["wait"], {"steel-plate": 35.0})
+    automated = receipt(False, {"steel-plate": 35.0})
     assert automated is not None
     assert automated.credited == {"steel-plate": 5.0}
 
 
 @UNIT
 def test_malformed_depot_telemetry_does_not_replace_last_good_cache():
-    worker = FLEWorker.__new__(FLEWorker)
-    worker._customer_depots_cache = []
-    worker._cache_customer_depots(
+    cache = parse_customer_depots(
         {
             "depots": [
                 {
@@ -441,10 +454,14 @@ def test_malformed_depot_telemetry_does_not_replace_last_good_cache():
         }
     )
 
-    worker._cache_customer_depots("ERR:LuaEntity API call when LuaEntity was invalid.")
+    assert cache is not None
+    assert (
+        parse_customer_depots("ERR:LuaEntity API call when LuaEntity was invalid.")
+        is None
+    )
 
-    assert len(worker._customer_depots_cache) == 1
-    assert worker._customer_depots_cache[0].unit_number == 42
+    assert len(cache) == 1
+    assert cache[0].unit_number == 42
 
 
 @UNIT
@@ -494,12 +511,10 @@ def test_adaptive_intervention_reward_uses_automation_delta_only():
 
 @UNIT
 def test_delivery_bucket_history_preserves_raw_window_rates_after_drain():
-    worker = FLEWorker.__new__(FLEWorker)
-    worker._delivery_history = []
-    worker._delivery_raw_totals = {}
-    worker._delivery_observed_tick = 0
+    history: list[tuple[int, dict[str, float]]] = []
+    raw_totals: dict[str, float] = {}
 
-    current_tick, samples = worker._parse_delivery_buckets(
+    current_tick, samples = parse_delivery_buckets(
         {
             "tick": 300,
             "buckets": {
@@ -511,12 +526,21 @@ def test_delivery_bucket_history_preserves_raw_window_rates_after_drain():
     )
     assert current_tick == 300
     assert samples == [(59, {"iron-plate": 50.0}), (119, {"iron-plate": 40.0})]
-    worker._record_delivery_samples(
+    observed = record_delivery_samples(
         {"tick": current_tick, "raw_delivery_totals": {"iron-plate": 90}},
         samples,
+        history,
+        raw_totals,
     )
 
-    telemetry = worker._delivery_telemetry_snapshot()
+    telemetry = build_delivery_telemetry(
+        history=history,
+        observed_tick=observed,
+        raw_totals=raw_totals,
+        manual_history=[],
+        manual_totals={},
+        contract_delivery_baseline={},
+    )
     assert telemetry.raw_totals == {"iron-plate": 90.0}
     assert telemetry.raw_rates_60s == {"iron-plate": 90.0}
     assert telemetry.raw_rates_300s == {"iron-plate": 18.0}
@@ -526,12 +550,10 @@ def test_delivery_bucket_history_preserves_raw_window_rates_after_drain():
 
 @UNIT
 def test_manual_depot_traffic_is_audited_but_excluded_from_crediting_samples():
-    worker = FLEWorker.__new__(FLEWorker)
-    worker._delivery_history = []
-    worker._delivery_raw_totals = {}
-    worker._manual_delivery_history = []
-    worker._manual_delivery_totals = {}
-    worker._delivery_observed_tick = 0
+    history: list[tuple[int, dict[str, float]]] = []
+    raw_totals: dict[str, float] = {}
+    manual_history: list[tuple[int, dict[str, float]]] = []
+    manual_totals: dict[str, float] = {}
     raw = {
         "tick": 120,
         "buckets": [
@@ -545,15 +567,22 @@ def test_manual_depot_traffic_is_audited_but_excluded_from_crediting_samples():
         "manual_delivery_totals": {"iron-plate": 40},
     }
 
-    current_tick, automated = worker._parse_delivery_buckets(raw)
-    _, manual = worker._parse_delivery_buckets(raw, item_field="manual_items")
-    worker._record_delivery_samples(raw, automated)
-    worker._record_manual_delivery_samples(raw, manual)
+    current_tick, automated = parse_delivery_buckets(raw)
+    _, manual = parse_delivery_buckets(raw, item_field="manual_items")
+    record_delivery_samples(raw, automated, history, raw_totals)
+    record_manual_delivery_samples(raw, manual, manual_history, manual_totals)
 
     assert current_tick == 120
     assert automated == [(119, {"iron-plate": 7.0})]
     assert manual == [(119, {"iron-plate": 40.0})]
-    telemetry = worker._delivery_telemetry_snapshot()
+    telemetry = build_delivery_telemetry(
+        history=history,
+        observed_tick=0,
+        raw_totals=raw_totals,
+        manual_history=manual_history,
+        manual_totals=manual_totals,
+        contract_delivery_baseline={},
+    )
     assert telemetry.raw_totals == {"iron-plate": 7.0}
     assert telemetry.manual_totals == {"iron-plate": 40.0}
     assert telemetry.sample_count == 1

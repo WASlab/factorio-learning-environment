@@ -31,6 +31,16 @@ from fle.envd.customer import (
     ContractEngine,
     DeliveryBucket,
 )
+from fle.envd.delivery import (
+    build_delivery_receipt,
+    build_delivery_telemetry,
+    parse_customer_depots,
+    parse_delivery_buckets,
+    recent_delivery_rates,
+    record_delivery_samples,
+    record_manual_delivery_samples,
+    translate_delivery_clock,
+)
 from fle.envd.errors import (
     CommitmentMismatch,
     EpochAlreadyActive,
@@ -905,141 +915,10 @@ class FLEWorker(FactorioWorker):
 
     _DEPOT_OFFSET = (-6.0, -10.0)
 
-    @staticmethod
-    def _lua_array(value: Any) -> list[Any]:
-        if isinstance(value, dict):
-
-            def sort_key(key: Any) -> tuple[int, str]:
-                try:
-                    return (0, f"{int(key):020d}")
-                except (TypeError, ValueError):
-                    return (1, str(key))
-
-            return [value[key] for key in sorted(value, key=sort_key)]
-        return list(value or [])
-
     def _cache_customer_depots(self, telemetry: Any) -> None:
-        if not isinstance(telemetry, dict):
-            return
-        raw_depots = self._lua_array(telemetry.get("depots"))
-        depots: list[CustomerDepotView] = []
-        for index, raw in enumerate(raw_depots, start=1):
-            if not isinstance(raw, dict) or not raw.get("valid", True):
-                continue
-            position = raw.get("position") or {}
-            if not isinstance(position, dict):
-                continue
-            try:
-                x = float(position["x"])
-                y = float(position["y"])
-            except (KeyError, TypeError, ValueError):
-                continue
-            unit_number = raw.get("unit_number")
-            try:
-                parsed_unit = int(unit_number) if unit_number is not None else None
-            except (TypeError, ValueError):
-                parsed_unit = None
-            depot_id = (
-                f"customer-depot-{parsed_unit}"
-                if parsed_unit is not None
-                else f"customer-depot-{index}"
-            )
-            entity_names = raw.get("entity_names") or {}
-            entity_name = raw.get("entity_name") or "steel-chest"
-            if isinstance(entity_names, dict) and entity_names:
-                entity_name = next(iter(entity_names))
-            surfaces = raw.get("surfaces") or {}
-            surface = raw.get("surface")
-            if isinstance(surfaces, dict) and surfaces:
-                surface = next(iter(surfaces))
-            products = raw.get("products") or {}
-            product = raw.get("product")
-            if isinstance(products, dict) and products:
-                product = next(iter(products))
-            depots.append(
-                CustomerDepotView(
-                    depot_id=depot_id,
-                    unit_number=parsed_unit,
-                    entity_name=str(entity_name),
-                    position={"x": x, "y": y},
-                    surface=(str(surface) if surface else None),
-                    customer_owned=bool(raw.get("customer_owned", True)),
-                    product=(str(product) if product else None),
-                    acceptance_limit=(
-                        float(raw["acceptance_limit"])
-                        if raw.get("acceptance_limit") is not None
-                        else None
-                    ),
-                    accepted=(
-                        float(raw["accepted"])
-                        if raw.get("accepted") is not None
-                        else None
-                    ),
-                )
-            )
-        if "depots" in telemetry:
+        depots = parse_customer_depots(telemetry)
+        if depots is not None:
             self._customer_depots_cache = depots
-
-    @staticmethod
-    def _parse_delivery_buckets(
-        telemetry: dict[str, Any],
-        *,
-        item_field: str = "items",
-    ) -> tuple[int, list[tuple[int, dict[str, float]]]]:
-        """Normalize Lua/RCON delivery buckets to chronological samples."""
-
-        current_tick = int(telemetry.get("tick") or 0)
-        raw_buckets = telemetry.get("buckets") or []
-        if isinstance(raw_buckets, dict):
-            raw_buckets = [
-                raw_buckets[key]
-                for key in sorted(raw_buckets, key=lambda key: int(key))
-            ]
-        samples: list[tuple[int, dict[str, float]]] = []
-        for bucket in raw_buckets:
-            if not isinstance(bucket, dict):
-                continue
-            start = int(bucket.get("start_tick") or 0)
-            end = start + DELIVERY_BUCKET_TICKS - 1
-            sample_tick = min(max(current_tick, start), end)
-            items = {
-                str(item): float(count)
-                for item, count in (bucket.get(item_field) or {}).items()
-                if float(count or 0.0) > 0
-            }
-            if items:
-                samples.append((sample_tick, items))
-        return current_tick, sorted(samples, key=lambda sample: sample[0])
-
-    def _delivery_on_episode_clock(self, telemetry: dict[str, Any]) -> dict[str, Any]:
-        """Translate Lua depot time to the worker's persistent episode clock.
-
-        Depot adoption resets its Lua clock, while checkpoint restoration keeps
-        the worker's original epoch. Without this translation, valid post-resume
-        arrivals can appear to predate the active order and are discarded.
-        Cumulative quantities are unaffected; both automated and manual buckets
-        share the same translation.
-        """
-        depot_epoch = telemetry.get("epoch_tick")
-        worker_epoch = getattr(self, "_epoch_game_tick", None)
-        if depot_epoch is None or worker_epoch is None:
-            return telemetry
-        offset = int(depot_epoch) - int(worker_epoch)
-        if not offset:
-            return telemetry
-        buckets = telemetry.get("buckets") or []
-        if isinstance(buckets, dict):
-            buckets = buckets.values()
-        return {
-            **telemetry,
-            "epoch_tick": int(worker_epoch),
-            "tick": int(telemetry.get("tick") or 0) + offset,
-            "buckets": [
-                {**bucket, "start_tick": int(bucket.get("start_tick") or 0) + offset}
-                for bucket in buckets
-                if isinstance(bucket, dict)
-            ],
-        }
 
     def _record_delivery_samples(
         self,
@@ -1054,27 +933,13 @@ class FLEWorker(FactorioWorker):
         raw_totals = getattr(self, "_delivery_raw_totals", None)
         if raw_totals is None:
             raw_totals = self._delivery_raw_totals = {}
-        current_tick = int(telemetry.get("tick") or 0)
-        self._delivery_observed_tick = max(
-            getattr(self, "_delivery_observed_tick", 0), current_tick
+        self._delivery_observed_tick = record_delivery_samples(
+            telemetry,
+            samples,
+            history,
+            raw_totals,
+            getattr(self, "_delivery_observed_tick", 0),
         )
-        for sample_tick, items in samples:
-            history.append((sample_tick, dict(items)))
-            for item, amount in items.items():
-                raw_totals[item] = raw_totals.get(item, 0.0) + amount
-        # Lua's cumulative counter remains authoritative if the process has
-        # observed a bucket before this Python worker was restarted.
-        reported = telemetry.get("raw_delivery_totals") or telemetry.get(
-            "delivered_total"
-        )
-        if isinstance(reported, dict):
-            for item, amount in reported.items():
-                raw_totals[str(item)] = max(
-                    raw_totals.get(str(item), 0.0), float(amount or 0.0)
-                )
-        # Keep the compact physical ledger authoritative for the lifetime of
-        # the run. Model observations expose only a bounded recent projection;
-        # historical queries read this ledger instead of the snapshot ring.
 
     def _record_manual_delivery_samples(
         self,
@@ -1089,124 +954,31 @@ class FLEWorker(FactorioWorker):
         totals = getattr(self, "_manual_delivery_totals", None)
         if totals is None:
             totals = self._manual_delivery_totals = {}
-        for sample_tick, items in samples:
-            history.append((sample_tick, dict(items)))
-            for item, amount in items.items():
-                totals[item] = totals.get(item, 0.0) + amount
-        reported = telemetry.get("manual_delivery_totals")
-        if isinstance(reported, dict):
-            for item, amount in reported.items():
-                totals[str(item)] = max(
-                    totals.get(str(item), 0.0), float(amount or 0.0)
-                )
-        # Manual traffic follows the same retention rule as raw delivery. It
-        # remains separate so direct insertion can never become credited flow.
+        record_manual_delivery_samples(telemetry, samples, history, totals)
 
     def _delivery_telemetry_snapshot(
         self, *, recent_limit: int = 120
     ) -> DepotDeliveryTelemetry:
         """Build a stable raw-delivery view for observations and contexts."""
 
-        history = list(getattr(self, "_delivery_history", []))
-        observed = max(
-            getattr(self, "_delivery_observed_tick", 0),
-            max((tick for tick, _ in history), default=0),
-        )
-        totals = {
-            str(item): round(float(amount), 6)
-            for item, amount in getattr(self, "_delivery_raw_totals", {}).items()
-            if amount > 0
-        }
-        manual_history = list(getattr(self, "_manual_delivery_history", []))
-        manual_totals = {
-            str(item): round(float(amount), 6)
-            for item, amount in getattr(self, "_manual_delivery_totals", {}).items()
-            if amount > 0
-        }
-
-        def rate(window_ticks: int) -> dict[str, float]:
-            cutoff = observed - window_ticks
-            values: dict[str, float] = {}
-            for tick, items in history:
-                if cutoff < tick <= observed:
-                    for item, amount in items.items():
-                        values[item] = values.get(item, 0.0) + amount
-            minutes = window_ticks / 3600.0
-            return {
-                item: round(amount / minutes, 6)
-                for item, amount in values.items()
-                if amount > 0
-            }
-
-        recent = [
-            {
-                "start_tick": max(tick - DELIVERY_BUCKET_TICKS + 1, 0),
-                "end_tick": tick,
-                "items": {
-                    item: round(float(amount), 6) for item, amount in items.items()
-                },
-            }
-            for tick, items in history[-max(0, recent_limit) :]
-        ]
-        return DepotDeliveryTelemetry(
-            observed_until_tick=observed,
-            bucket_ticks=DELIVERY_BUCKET_TICKS,
-            sample_count=len(history),
-            raw_totals=totals,
-            manual_totals=manual_totals,
-            raw_rates_60s=rate(3600),
-            raw_rates_300s=rate(18000),
-            raw_rates_5s=rate(300),
-            since_contract_totals={
-                str(item): round(
-                    max(
-                        float(amount)
-                        - getattr(self, "_contract_delivery_baseline", {}).get(
-                            item, 0.0
-                        ),
-                        0.0,
-                    ),
-                    6,
-                )
-                for item, amount in totals.items()
-                if amount
-                > getattr(self, "_contract_delivery_baseline", {}).get(item, 0.0)
-            },
-            recent_buckets=recent,
-            manual_sample_count=len(manual_history),
-            recent_manual_buckets=[
-                {
-                    "start_tick": max(tick - DELIVERY_BUCKET_TICKS + 1, 0),
-                    "end_tick": tick,
-                    "items": {
-                        item: round(float(amount), 6) for item, amount in items.items()
-                    },
-                }
-                for tick, items in manual_history[-max(0, recent_limit) :]
-            ],
+        return build_delivery_telemetry(
+            history=getattr(self, "_delivery_history", []),
+            observed_tick=getattr(self, "_delivery_observed_tick", 0),
+            raw_totals=getattr(self, "_delivery_raw_totals", {}),
+            manual_history=getattr(self, "_manual_delivery_history", []),
+            manual_totals=getattr(self, "_manual_delivery_totals", {}),
+            contract_delivery_baseline=getattr(self, "_contract_delivery_baseline", {}),
+            recent_limit=recent_limit,
         )
 
     def _recent_delivery_rates(self, window_seconds: int) -> dict[str, float]:
         """Return inserter-fed depot rates over an exact recent window."""
 
-        history = list(getattr(self, "_delivery_history", []))
-        observed = max(
+        return recent_delivery_rates(
+            list(getattr(self, "_delivery_history", [])),
             getattr(self, "_delivery_observed_tick", 0),
-            max((tick for tick, _ in history), default=0),
+            window_seconds,
         )
-        window_ticks = max(int(window_seconds), 1) * 60
-        cutoff = observed - window_ticks
-        totals: dict[str, float] = {}
-        for tick, items in history:
-            if cutoff < tick <= observed:
-                for item, amount in items.items():
-                    totals[item] = totals.get(item, 0.0) + float(amount)
-        minutes = window_ticks / 3600.0
-        return {
-            item: round(amount / minutes, 6)
-            for item, amount in totals.items()
-            if amount > 0
-        }
 
     def _delivery_totals(self) -> dict[str, float]:
         totals: dict[str, float] = {}
@@ -1220,95 +992,17 @@ class FLEWorker(FactorioWorker):
         executed_tools: list[str],
         delivered_before: dict[str, float],
     ) -> DeliveryReceipt | None:
-        attempted_insert = "insert_item" in executed_tools
-        contracts = self._contracts_view()
-        delivered_after = self._delivery_totals()
-        credited = {
-            item: round(amount - delivered_before.get(item, 0.0), 4)
-            for item, amount in delivered_after.items()
-            if amount - delivered_before.get(item, 0.0) > 1e-9
-        }
-        if not attempted_insert and not credited and not contracts:
-            return None
-        remaining: dict[str, float] = {}
-        for contract in contracts:
-            for item, amount in contract.remaining.items():
-                remaining[item] = remaining.get(item, 0.0) + float(amount)
-        open_contract = next(
-            (contract for contract in contracts if contract.status == "open"),
-            contracts[-1] if contracts else None,
-        )
-        sustained = bool(open_contract and open_contract.kind == "sustained")
         audit = getattr(self, "_throughput_audit_result", None)
-        throughput_certified = bool(audit is not None and audit.passed)
-        qualification_pending = bool(
-            sustained
-            and open_contract is not None
-            and open_contract.status == "open"
-            and not throughput_certified
-        )
-        if credited:
-            if sustained:
-                message = (
-                    "Inserter-fed depot delivery observed. This confirms depot "
-                    "transport only, not automated production. The sustained "
-                    "contract remains open until unattended production and depot "
-                    "throughput pass the autonomous audit; a zero physical "
-                    "delivery balance is not certification."
-                )
-            else:
-                message = (
-                    "Inserter-fed customer delivery credited. Contract demand is "
-                    "consumed; production above the acceptance limit remains in "
-                    "the bound chest."
-                )
-        elif contracts:
-            message = (
-                "No inserter-fed customer delivery was observed for this "
-                "intervention. This is an interval measurement, not an audit "
-                "failure. Direct insertion into the depot is audit-only; "
-                "fueling a machine is not itself a rejected depot delivery."
-            )
-            if sustained:
-                message += (
-                    " Sustained success requires unattended production and depot "
-                    "throughput to pass the autonomous audit."
-                )
-            if not self._customer_depots_cache:
-                message += " No delivery chest is bound. Bind an empty chest for the active product."
-            else:
-                message += (
-                    " If traffic remains zero, inspect the depot feeder's pickup/drop "
-                    "positions and status, then its source's fuel, ingredients, and output."
-                )
-        else:
-            message = "No customer contract is currently active."
-        return DeliveryReceipt(
-            credited=credited,
-            remaining={item: round(amount, 4) for item, amount in remaining.items()},
-            contract_status=open_contract.status if open_contract else None,
-            delivery_mode="inserter_fed" if credited else "none",
-            throughput_certified=throughput_certified,
-            qualification_pending=qualification_pending,
+        return build_delivery_receipt(
+            contracts=self._contracts_view(),
+            attempted_insert="insert_item" in executed_tools,
+            delivered_before=delivered_before,
+            throughput_audit_passed=bool(audit is not None and audit.passed),
             customer_depot_ids=[
                 depot.depot_id for depot in self._customer_depots_cache
             ],
-            observed_depot_totals={
-                item: round(
-                    max(
-                        float(amount)
-                        - float(
-                            getattr(self, "_contract_delivery_baseline", {}).get(
-                                item, 0.0
-                            )
-                        ),
-                        0.0,
-                    ),
-                    6,
-                )
-                for item, amount in getattr(self, "_delivery_raw_totals", {}).items()
-            },
-            message=message,
+            contract_delivery_baseline=getattr(self, "_contract_delivery_baseline", {}),
+            delivery_raw_totals=getattr(self, "_delivery_raw_totals", {}),
         )
 
     def _setup_customer(self, task: FactorioTaskSpec) -> ContractEngine | None:
@@ -1373,10 +1067,12 @@ class FLEWorker(FactorioWorker):
         except Exception:
             telemetry = {}
         self._cache_customer_depots(telemetry)
-        telemetry = self._delivery_on_episode_clock(telemetry)
-        current_tick, raw_bucket_list = self._parse_delivery_buckets(telemetry)
+        telemetry = translate_delivery_clock(
+            telemetry, getattr(self, "_epoch_game_tick", None)
+        )
+        current_tick, raw_bucket_list = parse_delivery_buckets(telemetry)
         self._record_delivery_samples(telemetry, raw_bucket_list)
-        _, manual_bucket_list = self._parse_delivery_buckets(
+        _, manual_bucket_list = parse_delivery_buckets(
             telemetry, item_field="manual_items"
         )
         self._record_manual_delivery_samples(telemetry, manual_bucket_list)
@@ -1788,11 +1484,13 @@ class FLEWorker(FactorioWorker):
             return []
         if not isinstance(raw_telemetry, dict):
             return []
-        engine_telemetry = self._delivery_on_episode_clock(raw_telemetry)
+        engine_telemetry = translate_delivery_clock(
+            raw_telemetry, getattr(self, "_epoch_game_tick", None)
+        )
         self._cache_customer_depots(engine_telemetry)
-        _current_tick, samples = self._parse_delivery_buckets(engine_telemetry)
+        _current_tick, samples = parse_delivery_buckets(engine_telemetry)
         self._record_delivery_samples(engine_telemetry, samples)
-        _, manual_samples = self._parse_delivery_buckets(
+        _, manual_samples = parse_delivery_buckets(
             engine_telemetry, item_field="manual_items"
         )
         self._record_manual_delivery_samples(engine_telemetry, manual_samples)

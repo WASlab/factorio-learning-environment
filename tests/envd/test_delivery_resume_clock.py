@@ -4,6 +4,11 @@ import pytest
 
 from fle.envd.backend import FLEWorker
 from fle.envd.customer import ActiveOrder
+from fle.envd.delivery import (
+    build_delivery_receipt,
+    parse_delivery_buckets,
+    translate_delivery_clock,
+)
 
 pytestmark = pytest.mark.no_factorio
 
@@ -43,9 +48,7 @@ def test_resumed_depot_arrivals_are_credited_on_persistent_order_clock():
 
 
 def test_non_aligned_epoch_offset_preserves_bucket_time_and_manual_fields():
-    worker = FLEWorker.__new__(FLEWorker)
-    worker._epoch_game_tick = 100
-    data = worker._delivery_on_episode_clock(
+    data = translate_delivery_clock(
         {
             "epoch_tick": 223,
             "tick": 70,
@@ -56,25 +59,29 @@ def test_non_aligned_epoch_offset_preserves_bucket_time_and_manual_fields():
                     "manual_items": {"iron-plate": 3},
                 }
             },
-        }
+        },
+        100,
     )
-    assert worker._parse_delivery_buckets(data) == (193, [(193, {"iron-plate": 2})])
-    assert worker._parse_delivery_buckets(data, item_field="manual_items") == (
+    assert parse_delivery_buckets(data) == (193, [(193, {"iron-plate": 2})])
+    assert parse_delivery_buckets(data, item_field="manual_items") == (
         193,
         [(193, {"iron-plate": 3})],
     )
 
 
 def test_wait_receipt_reports_pending_and_physical_traffic_without_false_certification():
-    worker = FLEWorker.__new__(FLEWorker)
-    worker.customer_engine = None
-    worker._active_order = ActiveOrder(
+    order = ActiveOrder(
         "iron-plate", 82, 198000, activation_tick=0, order_kind="sustained"
     )
-    worker._customer_depots_cache = []
-    worker._delivery_raw_totals = {"iron-plate": 50}
-    worker._contract_delivery_baseline = {"iron-plate": 10}
-    result = worker._delivery_receipt(["wait"], {})
+    result = build_delivery_receipt(
+        contracts=[order.student_view()],
+        attempted_insert=False,
+        delivered_before={},
+        throughput_audit_passed=False,
+        customer_depot_ids=[],
+        contract_delivery_baseline={"iron-plate": 10},
+        delivery_raw_totals={"iron-plate": 50},
+    )
     assert result.observed_depot_totals == {"iron-plate": 40}
     assert result.qualification_pending and not result.throughput_certified
     assert "not an audit failure" in result.message
