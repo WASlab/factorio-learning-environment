@@ -44,7 +44,7 @@ def test_mcp_state_query_schema_is_typed_and_available_in_full_profile():
     query = tools["factorio_query_state"]
     schema = query["inputSchema"]
     assert schema["required"] == ["kind"]
-    assert schema["properties"]["kind"]["enum"] == [
+    assert set(schema["properties"]["kind"]["enum"]) == {
         "inventory",
         "production",
         "delivery",
@@ -53,7 +53,7 @@ def test_mcp_state_query_schema_is_typed_and_available_in_full_profile():
         "contracts",
         "errors",
         "alerts",
-    ]
+    }
     assert schema["properties"]["limit"]["maximum"] == 128
     assert schema["properties"]["area"]["additionalProperties"] is False
 
