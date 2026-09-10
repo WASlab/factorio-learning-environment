@@ -195,11 +195,12 @@ async def metrics() -> dict:
         await initialize_session(None)
 
     try:
-        res1: Observation = state.gym_env.get_observation()
+        gym_env = state.ensure_gym_env()
+        res1: Observation = gym_env.get_observation()
         flows1: ProductionFlows = res1.flows
         await asyncio.sleep(1)
 
-        res2: Observation = state.gym_env.get_observation()
+        res2: Observation = gym_env.get_observation()
         flows2: ProductionFlows = res2.flows
 
         new_flows = ProductionFlows.get_new_flows(flows1, flows2)

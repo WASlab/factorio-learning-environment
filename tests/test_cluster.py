@@ -1,4 +1,5 @@
 import json
+import zipfile
 from pathlib import Path
 
 import pytest
@@ -29,6 +30,20 @@ def test_bundled_mod_config_is_staged_in_runtime_state(tmp_path):
         "enabled": True,
     }
     assert len(list(runtime_mods_dir.glob("fle-runtime_*.zip"))) == 1
+
+
+def test_runtime_mod_aligns_burner_drill_drop_point(tmp_path):
+    generator = ComposeGenerator(state_dir=tmp_path)
+    generator._bundled_mods_volume()
+
+    archive = next((tmp_path / "mods").glob("fle-runtime_*.zip"))
+    with zipfile.ZipFile(archive) as bundle:
+        entry = next(
+            name for name in bundle.namelist() if name.endswith("data-updates.lua")
+        )
+        source = bundle.read(entry).decode("utf-8")
+    assert 'data.raw["mining-drill"]["burner-mining-drill"]' in source
+    assert "vector_to_place_result = {1.5, 0}" in source
 
 
 def test_cluster_mounts_generated_runtime_mod_directory(tmp_path):

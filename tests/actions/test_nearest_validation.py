@@ -17,3 +17,10 @@ def test_nearest_rejects_bare_namespaces_and_strings_with_correction(value):
         Nearest._normalize_type(value)
 
     assert "Resource.Coal" in str(exc.value)
+
+
+def test_prototype_tree_points_at_the_wood_resource():
+    with pytest.raises(AttributeError, match=r"Resource\.Wood") as exc:
+        Prototype.Tree
+
+    assert "harvest_resource(nearest(Resource.Wood)" in str(exc.value)

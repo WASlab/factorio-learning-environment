@@ -57,6 +57,32 @@ def test_menu_native_intermediates_batch_rounding_and_depth_bound():
     """)
 
 
+def test_queue_craft_fast_mode_crafts_immediately():
+    lua = runtime()
+    lua.execute("""
+        storage.fast = true
+        storage.actions.craft_item = function(_, name, count)
+            fast_craft_request = {name=name, count=count}
+            return count
+        end
+        result = storage.actions.queue_craft(1, 'belt', 3)
+        assert(fast_craft_request.name == 'belt' and fast_craft_request.count == 3)
+        assert(result.crafted == 3 and result.queued == 3)
+        assert(result.partial == false and result.error == nil)
+    """)
+
+
+def test_queue_craft_fast_mode_reports_partial_when_ingredients_limit():
+    lua = runtime()
+    lua.execute("""
+        storage.fast = true
+        storage.actions.craft_item = function(_, _, count) return count end
+        result = storage.actions.queue_craft(1, 'belt', 9)
+        assert(result.crafted == 4 and result.partial == true)
+        assert(result.error == nil)
+    """)
+
+
 def test_locked_recipe_failure_has_same_menu_and_does_not_queue():
     lua = runtime()
     lua.execute("""

@@ -15,11 +15,26 @@ class ResourceName(enum.Enum):
 
 
 class PrototypeMetaclass(enum.EnumMeta):
+    # Natural-language names that map to a resource rather than a prototype.
+    _RESOURCE_ALIAS_HINTS = {
+        "Tree": "Resource.Wood",
+        "Trees": "Resource.Wood",
+        "Wood": "Resource.Wood",
+    }
+
     def __getattr__(cls, name):
         # Try to get the attribute normally first
         try:
             return cls._member_map_[name]
         except KeyError:
+            resource_hint = cls._RESOURCE_ALIAS_HINTS.get(name)
+            if resource_hint:
+                raise AttributeError(
+                    f"'{cls.__name__}' has no attribute '{name}'. "
+                    f"Trees are a resource: use {resource_hint}, for example "
+                    f"harvest_resource(nearest({resource_hint}), quantity=N)"
+                )
+
             # Get all valid prototype names
             valid_names = [member.name for member in cls]
 
