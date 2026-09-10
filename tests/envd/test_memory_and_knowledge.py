@@ -1,8 +1,10 @@
-import json
 
 import pytest
 
-from fle.envd.capability_graph import build_capability_graph, compare_capability_snapshots
+from fle.envd.capability_graph import (
+    build_capability_graph,
+    compare_capability_snapshots,
+)
 from fle.envd.contract_features import ProductCatalog, StaticRecipeDataSource
 from fle.envd.contract_generator import ContractCandidate
 from fle.envd.follow_up import choose_follow_up_candidate
@@ -20,7 +22,9 @@ from fle.envd.models import (
 pytestmark = pytest.mark.no_factorio
 
 
-def _snapshot(*, digest: str, tick: int, techs=(), unlocked=(), rates=None, entities=None):
+def _snapshot(
+    *, digest: str, tick: int, techs=(), unlocked=(), rates=None, entities=None
+):
     return ContractContextSnapshot(
         session_id="session",
         epoch_index=1,
@@ -63,7 +67,13 @@ def _catalog():
                     "enabled": False,
                 },
             ],
-            [{"name": "steel-processing", "prerequisites": [], "unlocked_recipes": ["steel-plate"]}],
+            [
+                {
+                    "name": "steel-processing",
+                    "prerequisites": [],
+                    "unlocked_recipes": ["steel-plate"],
+                }
+            ],
             game_version="2.0.73",
         )
     )
@@ -107,11 +117,19 @@ def test_game_data_reference_resolves_canonical_ids_and_unlock_path():
                 },
             ],
             "technologies": [
-                {"name": "steel-processing", "prerequisites": ["automation"], "unlocked_recipes": ["steel-plate"]},
+                {
+                    "name": "steel-processing",
+                    "prerequisites": ["automation"],
+                    "unlocked_recipes": ["steel-plate"],
+                },
                 {"name": "automation", "prerequisites": [], "unlocked_recipes": []},
             ],
             "prototypes": [
-                {"name": "steel-furnace", "type": "furnace", "crafting_categories": ["smelting"]},
+                {
+                    "name": "steel-furnace",
+                    "type": "furnace",
+                    "crafting_categories": ["smelting"],
+                },
                 {"name": "lab", "type": "lab", "crafting_categories": []},
             ],
         }
@@ -169,11 +187,16 @@ def test_game_data_reference_resolves_barrel_alias_and_reports_fluid_ambiguity()
 
 def test_checked_in_game_export_contains_prototype_and_exact_oil_facts():
     game, source = load_game_data()
-    assert source.endswith("factorio-2.0.73-contract-game-data.json")
+    assert source.endswith("factorio-2.0.77-contract-game-data.json")
     assert game.prototype("Prototype.Lab")["data"]["type"] == "lab"
     assert game.recipe("RecipeName.FillLubricantBarrel")["canonical_id"] == (
         "lubricant-barrel"
     )
+    assert game.technology("electronics")["data"]["research_trigger"] == {
+        "type": "craft-item",
+        "item": {"name": "copper-plate"},
+        "count": 10,
+    }
     with pytest.raises(KeyError, match="ambiguous"):
         game.recipe("petroleum-gas")
 
@@ -185,7 +208,9 @@ def test_api_reference_contains_all_tool_manuals():
     assert "api/agent/insert_item" in ids
     assert "api/agent/get_prototype_recipe" in ids
     search = reference.search("insert_item", kinds=["api"])
-    assert any(item["document_id"] == "api/agent/insert_item" for item in search["results"])
+    assert any(
+        item["document_id"] == "api/agent/insert_item" for item in search["results"]
+    )
     page = reference.read("api/agent/insert_item")
     assert page["content"]
 
@@ -320,7 +345,10 @@ def test_follow_up_repeats_frontier_after_capability_progress():
 
 def test_follow_up_backs_off_to_dependency_after_zero_progress():
     selected, follow_up = choose_follow_up_candidate(
-        [_candidate("steel-plate", 80, 4500), _candidate("iron-plate", 30, 5000, mixture="consolidation")],
+        [
+            _candidate("steel-plate", 80, 4500),
+            _candidate("iron-plate", 30, 5000, mixture="consolidation"),
+        ],
         previous_spec=_previous_spec(),
         previous_outcome=_outcome("expired"),
         capability_delta=None,

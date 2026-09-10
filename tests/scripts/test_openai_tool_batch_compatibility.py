@@ -47,13 +47,12 @@ def test_native_batch_stops_after_terminal_and_synthesizes_remaining_results():
 
     completions = Completions()
     session = object.__new__(OpenAICompatibleAgentSession)
-    session._client = SimpleNamespace(
-        chat=SimpleNamespace(completions=completions)
-    )
+    session._client = SimpleNamespace(chat=SimpleNamespace(completions=completions))
     session.model = "test-model"
     session.temperature = 0.0
     session.max_turns = 4
     session.messages = []
+    session._state_executor = None
     executed: list[str] = []
 
     async def execute(code: str, *, request_id=None):
@@ -80,7 +79,9 @@ def test_native_batch_stops_after_terminal_and_synthesizes_remaining_results():
     assert executed == ["first()"]
     assert completions.requests == 1
     assert completions.request_kwargs["parallel_tool_calls"] is True
-    tool_messages = [message for message in session.messages if message["role"] == "tool"]
+    tool_messages = [
+        message for message in session.messages if message["role"] == "tool"
+    ]
     assert [message["tool_call_id"] for message in tool_messages] == [
         "call-1",
         "call-2",

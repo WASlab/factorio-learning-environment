@@ -10,7 +10,11 @@ from types import SimpleNamespace
 
 import pytest
 
-from fle.envd.backend import FactorioWorker, FLEWorker
+from fle.envd.backend import (
+    FLEWorker,
+    FactorioWorker,
+    _intervention_reward_delta,
+)
 from fle.envd.customer import ActiveOrder
 from fle.envd.errors import (
     CommitmentMismatch,
@@ -47,7 +51,7 @@ class ContractFakeWorker(FactorioWorker):
 
     def __init__(self, worker_id="worker-contract-0"):
         self.worker_id = worker_id
-        self.factory: dict = {"entities": 10, "research": ["electricity"]}
+        self.factory: dict = {"entities": 10, "research": ["steam-power"]}
         self.tick = 1000  # absolute simulation tick
         self.released = False
         self.task: FactorioTaskSpec | None = None
@@ -253,7 +257,7 @@ def _spec(
         session_id=session,
         epoch_index=epoch_index,
         captured_tick=500 * epoch_index,
-        technology_ids=("electricity",),
+        technology_ids=("steam-power",),
         unlocked_recipe_ids=(),
         inventory_counts={},
         placed_entity_counts={},
@@ -318,6 +322,8 @@ def test_adaptive_depot_placement_requires_explicit_task_marker():
     class Namespace:
         def _customer_depot(self, command, *args):
             calls.append((command, args))
+            if command == "designated":
+                return {"mode": "designated"}
             if command == "place":
                 return {"placed": 8}
             if command == "telemetry":
@@ -339,7 +345,9 @@ def test_adaptive_depot_placement_requires_explicit_task_marker():
 
     # Ordinary open-play tasks retain their existing no-depot behavior.
     worker._setup_customer(
-        FactorioTaskSpec(task_id="ordinary-open-play", goal="build", task_family="open_play")
+        FactorioTaskSpec(
+            task_id="ordinary-open-play", goal="build", task_family="open_play"
+        )
     )
     assert calls == [("clear", ())]
 
@@ -352,8 +360,8 @@ def test_adaptive_depot_placement_requires_explicit_task_marker():
             adaptive_contract_session=True,
         )
     )
-    assert calls and calls[0][0] == "place"
-    assert worker._adaptive_depot_placed is True
+    assert calls and calls[0][0] == "designated"
+    assert worker._adaptive_depot_placed is False
     assert worker._customer_depots_cache[0].position == {"x": -5.5, "y": -9.5}
 
 
@@ -361,7 +369,14 @@ def test_adaptive_depot_placement_requires_explicit_task_marker():
 def test_customer_depot_metadata_and_delivery_receipts_are_unambiguous():
     worker = FLEWorker.__new__(FLEWorker)
     worker.customer_engine = None
-    worker._active_order = ActiveOrder("steel-plate", 100, 3600, activation_tick=0)
+    worker._active_order = ActiveOrder(
+        "steel-plate",
+        100,
+        3600,
+        activation_tick=0,
+        order_kind="sustained",
+    )
+    worker._throughput_audit_result = None
     worker._customer_depots_cache = []
     worker._cache_customer_depots(
         {
@@ -387,18 +402,94 @@ def test_customer_depot_metadata_and_delivery_receipts_are_unambiguous():
     assert missed is not None
     assert missed.credited == {}
     assert missed.remaining == {"steel-plate": 100.0}
-    assert "No customer delivery was credited" in missed.message
+    assert "No inserter-fed customer delivery was observed" in missed.message
+    assert missed.delivery_mode == "none"
+    assert missed.qualification_pending is True
+    assert missed.throughput_certified is False
 
     worker._active_order.attribute(40.0, 60)
     credited = worker._delivery_receipt(["insert_item"], {})
     assert credited is not None
     assert credited.credited == {"steel-plate": 40.0}
     assert credited.remaining == {"steel-plate": 60.0}
-    assert "drained immediately" in credited.message
+    assert "transport only, not automated production" in credited.message
+    assert credited.delivery_mode == "inserter_fed"
+    assert credited.qualification_pending is True
 
     automated = worker._delivery_receipt(["wait"], {"steel-plate": 35.0})
     assert automated is not None
     assert automated.credited == {"steel-plate": 5.0}
+
+
+@UNIT
+def test_malformed_depot_telemetry_does_not_replace_last_good_cache():
+    worker = FLEWorker.__new__(FLEWorker)
+    worker._customer_depots_cache = []
+    worker._cache_customer_depots(
+        {
+            "depots": [
+                {
+                    "unit_number": 42,
+                    "valid": True,
+                    "entity_name": "iron-chest",
+                    "position": {"x": 1.5, "y": 2.5},
+                    "surface": "nauvis",
+                    "customer_owned": False,
+                    "product": "iron-plate",
+                }
+            ]
+        }
+    )
+
+    worker._cache_customer_depots("ERR:LuaEntity API call when LuaEntity was invalid.")
+
+    assert len(worker._customer_depots_cache) == 1
+    assert worker._customer_depots_cache[0].unit_number == 42
+
+
+@UNIT
+def test_drain_delivery_buckets_contains_malformed_tool_response():
+    class Namespace:
+        def _customer_depot(self, command, *args):
+            assert command == "telemetry"
+            return "ERR:LuaEntity API call when LuaEntity was invalid."
+
+    worker = FLEWorker.__new__(FLEWorker)
+    worker.instance = SimpleNamespace(first_namespace=Namespace())
+    worker._customer_depots_cache = []
+
+    assert worker._drain_delivery_buckets() == []
+
+
+@UNIT
+def test_adaptive_intervention_reward_uses_automation_delta_only():
+    adaptive = FactorioTaskSpec(
+        task_id="adaptive",
+        goal="sustain production",
+        adaptive_contract_session=True,
+    )
+    ordinary = FactorioTaskSpec(task_id="ordinary", goal="produce items")
+
+    assert (
+        _intervention_reward_delta(
+            adaptive,
+            production_before=10,
+            production_after=110,
+            automated_before=3,
+            automated_after=7,
+        )
+        == 4
+    )
+    assert (
+        _intervention_reward_delta(
+            ordinary,
+            production_before=10,
+            production_after=110,
+            automated_before=3,
+            automated_after=7,
+        )
+        == 100
+    )
 
 
 @UNIT
@@ -569,6 +660,27 @@ def test_active_state_cleared_then_next_epoch_opens():
 
 
 @UNIT
+def test_next_epoch_clears_prior_epoch_terminal_reason():
+    service, _worker, lease_id = _service()
+    spec1 = _spec(1)
+    service.begin_contract_epoch(lease_id, spec1, request_id="begin-1")
+    service._leases[lease_id].terminal_reason = "throughput_audit_passed"
+    service.finalize_contract_epoch(
+        lease_id,
+        1,
+        spec1.commitment_hash,
+        request_id="final-1",
+    )
+
+    spec2 = _spec(2, item="copper-plate")
+    service.begin_contract_epoch(lease_id, spec2, request_id="begin-2")
+
+    assert service._leases[lease_id].terminal_reason is None
+    result = service.execute(lease_id, "continue_factory()")
+    assert result.event.sequence == 1
+
+
+@UNIT
 def test_world_persists_across_epochs_while_counters_reset():
     """The factory built in epoch 1 exists in epoch 2 (section 14 invariant)."""
     service, worker, lease_id = _service()
@@ -731,9 +843,7 @@ def test_live_worker_sync_exposes_and_terminates_adaptive_order():
     worker = FLEWorker.__new__(FLEWorker)
     worker.customer_engine = None
     worker._active_epoch_index = 1
-    worker._active_order = ActiveOrder(
-        "iron-plate", 100, 3600, activation_tick=0
-    )
+    worker._active_order = ActiveOrder("iron-plate", 100, 3600, activation_tick=0)
     worker._customer_events = []
     worker._epoch_game_tick = 0
     worker._drain_delivery_buckets = lambda: [(299, {"iron-plate": 100.0})]
@@ -753,9 +863,7 @@ def test_live_worker_sync_expires_adaptive_order_without_delivery():
 
     worker = FLEWorker.__new__(FLEWorker)
     worker._active_epoch_index = 1
-    worker._active_order = ActiveOrder(
-        "iron-plate", 100, 3600, activation_tick=0
-    )
+    worker._active_order = ActiveOrder("iron-plate", 100, 3600, activation_tick=0)
     worker._customer_events = []
     worker._epoch_game_tick = 0
     worker._drain_delivery_buckets = lambda: []
@@ -790,6 +898,7 @@ def test_authoritative_throughput_check_measures_unattended_depot_rate():
     class Namespace:
         @staticmethod
         def sleep(seconds):
+            assert 0 < seconds <= 15, "Match the real agent sleep limit"
             clock["tick"] += seconds * 60
 
     class Instance:
@@ -813,9 +922,7 @@ def test_authoritative_throughput_check_measures_unattended_depot_rate():
     worker._episode_tick = lambda: clock["tick"]
     worker._drain_delivery_buckets = drain
 
-    result = worker.check_contract_throughput(
-        "lease-1", authoritative=True
-    )
+    result = worker.check_contract_throughput("lease-1", authoritative=True)
 
     assert result.window_ticks == 3600
     assert result.delivered_by_product == {"iron-plate": 10.0}
@@ -833,6 +940,71 @@ def test_authoritative_throughput_check_measures_unattended_depot_rate():
 class TestTwoEpochLivePersistence:
     """Builds in epoch 1; proves factory, research, and inventory survive
     into epoch 2 while active-order state and epoch counters reset."""
+
+    def test_agent_designated_chest_consumes_allowance_and_retains_surplus(self):
+        from fle.env.entities import Position
+        from fle.env.game_types import Prototype
+        from fle.envd.models import VerifierSpec
+
+        worker = FLEWorker.connect("designated-depot-worker", tcp_port=27001)
+        try:
+            worker.start_task(
+                FactorioTaskSpec(
+                    task_id="designated_delivery_live_v1",
+                    goal="Deliver through an agent-selected chest.",
+                    verifier=VerifierSpec(implementation="objective_engine_v1"),
+                    adaptive_contract_session=True,
+                    holdout_seconds=0,
+                )
+            )
+            spec = _spec(1, quantity=20, session="designated-live")
+            worker.begin_contract_epoch(spec)
+            namespace = worker.instance.first_namespace
+            namespace._set_inventory({"iron-chest": 1})
+            chest = namespace.place_entity(
+                Prototype.IronChest, position=Position(x=2, y=0)
+            )
+
+            binding = namespace.set_delivery_chest(chest, Prototype.IronPlate)
+            assert binding["bound"] is True
+            assert binding["product"] == "iron-plate"
+
+            bound_position = binding["position"]
+            worker.instance.rcon_client.send_command(
+                "/sc local chest=game.surfaces[1].find_entity('iron-chest',"
+                f"{{x={bound_position['x']},y={bound_position['y']}}}); "
+                "chest.insert{name='iron-plate',count=25}"
+            )
+            worker.instance.set_speed_and_unpause(10)
+            try:
+                namespace.sleep(1)
+            finally:
+                worker.instance.pause()
+            worker._sync_active_order()
+
+            # All inserter-fed arrivals remain visible to the throughput
+            # detector even though contract credit is capped at 20.
+            assert worker._delivery_raw_totals["iron-plate"] == 25
+            assert worker._customer_depots_cache[0].product == "iron-plate"
+            assert worker._customer_depots_cache[0].accepted == 20
+            remaining = worker.instance.rcon_client.send_command(
+                "/sc local chest=game.surfaces[1].find_entity('iron-chest',"
+                f"{{x={bound_position['x']},y={bound_position['y']}}}); "
+                "rcon.print(chest.get_item_count('iron-plate'))"
+            )
+            assert int(remaining) == 5
+
+            worker.finalize_contract_epoch(1, spec.commitment_hash)
+            assert worker._customer_depots_cache == []
+            flags = worker.instance.rcon_client.send_command(
+                "/sc local chest=game.surfaces[1].find_entity('iron-chest',"
+                f"{{x={bound_position['x']},y={bound_position['y']}}}); "
+                "rcon.print(tostring(chest.operable)..','.."
+                "tostring(chest.minable_flag)..','..tostring(chest.destructible))"
+            )
+            assert flags == "true,true,true"
+        finally:
+            worker.release()
 
     def test_two_epochs_inherit_factory(self):
         from fle.envd.backend import FLEWorker
@@ -857,9 +1029,17 @@ class TestTwoEpochLivePersistence:
 
             worker.instance.first_namespace._set_inventory({"stone-furnace": 1})
             build_program = """
-position = Position(x=-6.0, y=0.0)
-move_to(position)
-entity = place_entity(Prototype.StoneFurnace, position=position)
+position = None
+for x in range(-8, -3):
+    for y in range(-3, 4):
+        candidate = Position(x=x, y=y)
+        if can_place_entity(Prototype.StoneFurnace, position=candidate):
+            position = candidate
+            break
+    if position is not None:
+        break
+assert position is not None
+entity = place_entity(Prototype.StoneFurnace, position=position, exact=True)
 print('built', entity is not None)
 """
             result = worker.execute("lease-live", build_program, 1)

@@ -19,6 +19,45 @@ The system allows you to:
 
 ## Setup and Usage
 
+### Watch an Agent
+
+The local cluster reserves the multiplayer identity `fle-observer`. The scenario
+changes that client to a read-only spectator with no character whenever it joins.
+It is excluded from agent inventories and entity census. A private, per-cluster
+password is generated outside the repository and supplied automatically by
+`fle watch`.
+
+Before connecting, set the Factorio multiplayer player name to `fle-observer`.
+Then validate the local client and server versions without launching:
+
+```bash
+fle watch --check
+```
+
+Launch the installed graphical client and connect to instance zero:
+
+```bash
+fle watch
+```
+
+Instance `N` maps to game port `34197 + N`; select it with
+`fle watch --instance N`. The benchmark
+server deliberately runs base Factorio only, so a Space Age client may offer to
+synchronize its enabled mods before joining. Observer sessions are diagnostic;
+official throughput results continue to use the configured accelerated game
+speed.
+
+The observer can join, leave, and reconnect while an evaluation is running. FLE
+packages its callable Lua runtime as a generated local mod shared by the server
+and an isolated observer mod directory, while Factorio `storage` contains data
+only. Multiplayer map transfer therefore does not depend on attach order and
+your normal Space Age mod configuration is not changed.
+
+For a deliberately non-official, human-readable session, start envd with
+`--execution-game-speed 1`. The default remains `10`; changing speed alters
+wall-clock behavior and must be reported with any result even though simulated
+tick deadlines are unchanged.
+
 ### Prerequisites
 
 - Docker installed and running
@@ -31,7 +70,7 @@ The `run-envs.sh` script provides a convenient way to start, stop, and manage Fa
 #### Basic Usage
 
 ```bash
-# Start a single instance with default settings (default_lab_scenario)
+# Start a single instance on a normally generated open_world map
 ./run-envs.sh
 
 # Start 5 instances with default scenario
@@ -53,7 +92,7 @@ The `run-envs.sh` script provides a convenient way to start, stop, and manage Fa
 #### Command Line Options
 
 - `-n NUMBER` - Number of Factorio instances to run (1-33, default: 1)
-- `-s SCENARIO` - Scenario to run (open_world or default_lab_scenario, default: default_lab_scenario)
+- `-s SCENARIO` - Scenario to run (open_world or default_lab_scenario, default: open_world)
 
 #### Available Commands
 
@@ -104,6 +143,29 @@ The following directories are mounted in each container:
 - Containers are configured to restart unless stopped manually
 
 ## Troubleshooting
+
+### Moving the observer while simulation is paused
+
+`fle watch` automatically opens the companion camera palette after the graphical
+observer connects, or reopens it if the observer is already connected and the
+palette was closed. `fle watch --check` only checks readiness. You can also open
+the palette separately:
+
+```powershell
+uv run python -m fle.cluster.observer_camera
+```
+
+Use the arrows (or WASD while the palette has focus), choose a 4–64 tile pan
+step, and use Zoom +/−. **Agent** or Home recenters on the model's character.
+The palette stays above the Factorio window. `--instance N` selects another
+local server. Closing the palette leaves the evaluation and observer running.
+
+The controls reposition only the existing read-only spectator through RCON;
+they work during model thinking pauses without stepping simulation time or
+enabling editor mode. Native WASD inside Factorio still depends on simulation
+ticks. A disconnected observer produces an error; reconnect it with `fle watch`
+and retry. Pan destinations must already have generated terrain. The palette
+does not expose world editing, pause, speed, or benchmark controls.
 
 If you encounter issues:
 

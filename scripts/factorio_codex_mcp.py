@@ -8,14 +8,18 @@ only observes/executes against ENVD_URL for LEASE_ID.
 from __future__ import annotations
 
 import ast
+import base64
+import concurrent.futures
 import hashlib
 import json
 import os
 import sys
+import threading
 import time
 import urllib.error
 import urllib.parse
 import urllib.request
+from pathlib import Path
 from typing import Any
 
 from fle.envd.knowledge import ApiReference, GameDataReference, load_game_data
@@ -31,7 +35,9 @@ SUPPORTED_PROTOCOL_VERSIONS = (
     "2024-11-05",
 )
 REPEATED_FAILURE_LIMIT = 3
-MAX_TOOL_RESULT_CHARS = 60_000
+MAX_TOOL_RESULT_CHARS = 12_000
+MAX_EXECUTION_RECEIPT_CHARS = 4_000
+MAX_EXECUTION_OUTPUT_PREVIEW_CHARS = 1_500
 # These limits apply only to the model-facing MCP projection.  The envd
 # response and the terminal signal remain complete for privileged accounting.
 MAX_MODEL_EVENT_ITEMS = 48
@@ -56,9 +62,46 @@ _process_nonce = hashlib.sha256(
     f"{os.getpid()}:{time.time_ns()}".encode("utf-8")
 ).hexdigest()[:16]
 _tool_call_sequence = 0
+_render_call_sequence = 0
 _api_reference: ApiReference | None = None
 _game_data_reference: GameDataReference | None = None
 _game_data_source: str | None = None
+
+
+def _tool_artifact_dir() -> Path | None:
+    configured = os.environ.get("FACTORIO_TOOL_ARTIFACT_DIR", "").strip()
+    if not configured:
+        return None
+    path = Path(configured)
+    path.mkdir(parents=True, exist_ok=True)
+    return path
+
+
+def _execution_artifact_id(result: dict[str, Any]) -> str:
+    event = result.get("event") if isinstance(result.get("event"), dict) else {}
+    sequence = event.get("sequence", "unknown")
+    material = json.dumps(result, sort_keys=True, separators=(",", ":"), default=str)
+    digest = hashlib.sha256(material.encode("utf-8")).hexdigest()
+    return f"execution-{sequence}-{digest[:16]}"
+
+
+def _persist_execution_artifact(result: dict[str, Any]) -> dict[str, Any]:
+    serialized = json.dumps(result, sort_keys=True, separators=(",", ":"), default=str)
+    digest = hashlib.sha256(serialized.encode("utf-8")).hexdigest()
+    artifact_id = _execution_artifact_id(result)
+    directory = _tool_artifact_dir()
+    if directory is not None:
+        destination = directory / f"{artifact_id}.json"
+        if not destination.exists():
+            temporary = destination.with_suffix(f".{os.getpid()}.tmp")
+            temporary.write_text(serialized + "\n", encoding="utf-8")
+            os.replace(temporary, destination)
+    return {
+        "id": artifact_id,
+        "sha256": digest,
+        "json_chars": len(serialized),
+        "retrievable": directory is not None,
+    }
 
 
 def _reset_repetition_state() -> None:
@@ -81,6 +124,11 @@ def _knowledge() -> tuple[ApiReference, GameDataReference]:
 
 def _memory_enabled() -> bool:
     return os.environ.get("MEMORY_ENABLED", "0").lower() in {"1", "true", "yes"}
+
+
+def _terminal_finalization_only() -> bool:
+    marker = os.environ.get("MCP_TERMINAL_FINALIZATION_FILE", "")
+    return bool(marker and Path(marker).is_file())
 
 
 def _query_path(path: str, values: dict[str, object]) -> str:
@@ -283,9 +331,7 @@ def _bounded_nested_value(
         edge_count = max(max_items - len(selected), 0)
         head_count = edge_count // 2
         edge_items = [
-            (key, item)
-            for key, item in items
-            if str(key) not in selected_keys
+            (key, item) for key, item in items if str(key) not in selected_keys
         ]
         selected.extend(edge_items[:head_count])
         selected_keys.update(str(key) for key, _ in edge_items[:head_count])
@@ -340,7 +386,9 @@ def _bounded_nested_value(
     return value
 
 
-def _numeric_totals(records: list[dict[str, Any]], field: str) -> dict[str, int | float]:
+def _numeric_totals(
+    records: list[dict[str, Any]], field: str
+) -> dict[str, int | float]:
     totals: dict[str, float] = {}
     for record in records:
         values = record.get(field)
@@ -351,9 +399,7 @@ def _numeric_totals(records: list[dict[str, Any]], field: str) -> dict[str, int 
             if number is not None:
                 name = str(key)
                 totals[name] = totals.get(name, 0.0) + number
-    return {
-        key: _normalise_number(totals[key]) for key in sorted(totals)
-    }
+    return {key: _normalise_number(totals[key]) for key in sorted(totals)}
 
 
 def _craft_records(value: Any) -> list[dict[str, Any]]:
@@ -379,7 +425,8 @@ def _aggregate_craft_history(value: Any) -> Any:
         recent = summary.get("recent")
         if isinstance(recent, (list, tuple)):
             summary["recent"] = [
-                _bounded_nested_value(item) for item in list(recent)[-MAX_MODEL_CRAFT_ITEMS:]
+                _bounded_nested_value(item)
+                for item in list(recent)[-MAX_MODEL_CRAFT_ITEMS:]
             ]
             if len(recent) > MAX_MODEL_CRAFT_ITEMS:
                 summary["recent_truncated"] = True
@@ -448,9 +495,7 @@ def _shape_action_event(event: dict[str, Any]) -> dict[str, Any]:
     if "result" in event:
         result = event["result"]
         if isinstance(result, str):
-            shaped["result"] = _truncate_model_text(
-                result, MAX_MODEL_EVENT_TEXT_CHARS
-            )
+            shaped["result"] = _truncate_model_text(result, MAX_MODEL_EVENT_TEXT_CHARS)
             if len(result) > MAX_MODEL_EVENT_TEXT_CHARS:
                 shaped["result_truncated"] = True
         else:
@@ -461,10 +506,7 @@ def _shape_action_event(event: dict[str, Any]) -> dict[str, Any]:
 def _shape_verifier_event(event: Any) -> Any:
     if not isinstance(event, dict):
         return _bounded_nested_value(event)
-    return {
-        str(key): _bounded_nested_value(value)
-        for key, value in event.items()
-    }
+    return {str(key): _bounded_nested_value(value) for key, value in event.items()}
 
 
 def _summarise_event_stream(events: Any) -> dict[str, Any]:
@@ -534,6 +576,11 @@ def _shape_model_payload(payload: Any) -> Any:
         shaped["event"] = _shape_action_event(shaped["event"])
     for key in ("events", "event_stream", "action_events"):
         if key in shaped:
+            if (
+                key == "events"
+                and shaped.get("schema_version") == "factorio-execution-receipt-v1"
+            ):
+                continue
             event_summary = _summarise_event_stream(shaped[key])
             shaped[key] = event_summary.pop("events")
             if key == "events":
@@ -553,6 +600,21 @@ def _preserved_payload_summary(payload: Any) -> dict[str, Any]:
     if not isinstance(payload, dict):
         return {}
     summary: dict[str, Any] = {}
+    if isinstance(payload.get("status_changes"), dict):
+        changes = payload["status_changes"]
+        summary["status_changes"] = {
+            key: changes[key]
+            for key in (
+                "available",
+                "revision",
+                "retained_after_revision",
+                "retention_expired",
+                "reason",
+            )
+            if key in changes
+        }
+        events = list(changes.get("events") or [])
+        summary["status_changes"].update(events=events[:4], truncated=True)
     for key in (
         "lease_id",
         "task_id",
@@ -594,6 +656,166 @@ def _preserved_payload_summary(payload: Any) -> dict[str, Any]:
         max_items=16,
         max_string_chars=256,
     )
+
+
+def _contract_result(result: dict[str, Any]) -> dict[str, Any] | None:
+    """Normalize direct and event-derived contract terminal facts."""
+
+    terminal_event = next(
+        (
+            event
+            for event in reversed(result.get("events") or [])
+            if isinstance(event, dict)
+            and event.get("kind") in {"contract_fulfilled", "contract_expired"}
+        ),
+        None,
+    )
+    direct_reason = result.get("terminal_reason")
+    if terminal_event is None and direct_reason not in {
+        "contract_fulfilled",
+        "contract_expired",
+    }:
+        return None
+    reason = (
+        str(terminal_event.get("kind"))
+        if terminal_event
+        else str(direct_reason)
+        if direct_reason
+        else None
+    )
+    if reason is None:
+        return None
+
+    payload = (
+        terminal_event.get("payload")
+        if terminal_event and isinstance(terminal_event.get("payload"), dict)
+        else {}
+    )
+    receipt = (
+        result.get("delivery_receipt")
+        if isinstance(result.get("delivery_receipt"), dict)
+        else {}
+    )
+    status = payload.get("status") or receipt.get("contract_status")
+    if not status and reason.startswith("contract_"):
+        status = reason.removeprefix("contract_")
+    normalized = {
+        "status": status,
+        "terminal_reason": reason,
+        "tick": terminal_event.get("tick") if terminal_event else None,
+        "requested_by_product": payload.get("requested") or {},
+        "delivered_by_product": payload.get("delivered") or {},
+        "remaining_by_product": payload.get("remaining")
+        or receipt.get("remaining")
+        or {},
+        "completion_ratio": payload.get("completion_ratio"),
+    }
+    return _bounded_nested_value(normalized)
+
+
+def _execution_receipt(result: dict[str, Any]) -> dict[str, Any]:
+    """Return compact public facts while retaining the full audit artifact."""
+
+    event = result.get("event") if isinstance(result.get("event"), dict) else {}
+    raw_output = str(event.get("result", ""))
+    contract_result = _contract_result(result)
+    status_changes = dict(result.get("status_changes") or {})
+    # Current tooltip state belongs to observations; receipts carry transitions.
+    status_changes.pop("current", None)
+    status_changes.pop("current_truncated", None)
+    status_events = list(status_changes.get("events") or [])
+    status_events.sort(
+        key=lambda event: (-event.get("peak_severity", 0), event.get("sequence", 0))
+    )
+    status_changes["events"] = status_events[:16]
+    status_changes["truncated"] = bool(
+        status_changes.get("truncated") or len(status_events) > 16
+    )
+    receipt: dict[str, Any] = {
+        "schema_version": "factorio-execution-receipt-v1",
+        "execution_id": _execution_artifact_id(result),
+        "sequence": event.get("sequence"),
+        "status": "error" if event.get("error") else "success",
+        "execution_started": not bool(event.get("policy_violations")),
+        "ticks": event.get("ticks"),
+        "duration_seconds": event.get("duration_seconds"),
+        "executed_tools": list(event.get("executed_tools") or [])[:64],
+        "policy_violations": list(event.get("policy_violations") or [])[:16],
+        "state_hash": result.get("state_hash"),
+        "production_score": result.get("production_score"),
+        "automated_production_score": result.get("automated_production_score"),
+        "research": _bounded_nested_value(result.get("research")),
+        "status_changes": status_changes,
+        "evaluation_progress": result.get("evaluation_progress"),
+        "delivery_receipt": _bounded_nested_value(result.get("delivery_receipt")),
+        "terminal_reason": (
+            (contract_result or {}).get("terminal_reason")
+            or result.get("terminal_reason")
+        ),
+        "contract_result": contract_result,
+        "resume_checkpoint": _bounded_nested_value(result.get("resume_checkpoint")),
+        "resume_checkpoint_error": result.get("resume_checkpoint_error"),
+        "output": {
+            "preview": _truncate_model_text(
+                raw_output, MAX_EXECUTION_OUTPUT_PREVIEW_CHARS
+            ),
+            "chars": len(raw_output),
+            "sha256": hashlib.sha256(raw_output.encode("utf-8")).hexdigest(),
+            "truncated": len(raw_output) > MAX_EXECUTION_OUTPUT_PREVIEW_CHARS,
+        },
+        "artifact": _persist_execution_artifact(result),
+    }
+    event_summary = _summarise_event_stream(result.get("events", []))
+    receipt.update(
+        {
+            "events": event_summary.get("events", []),
+            "event_count": event_summary.get("event_count", 0),
+            "event_kind_counts": event_summary.get("event_kind_counts", {}),
+            "events_omitted": event_summary.get("events_omitted", 0),
+        }
+    )
+    return receipt
+
+
+def _read_execution_artifact(arguments: dict[str, Any]) -> dict[str, Any]:
+    artifact_id = str(arguments.get("execution_id", "")).strip()
+    if not artifact_id or any(
+        ch not in "abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789-_"
+        for ch in artifact_id
+    ):
+        raise ValueError("execution_id must be a returned execution artifact id")
+    directory = _tool_artifact_dir()
+    if directory is None:
+        raise ValueError("execution artifact retrieval is not configured")
+    path = directory / f"{artifact_id}.json"
+    if not path.exists():
+        raise ValueError(f"unknown execution artifact: {artifact_id}")
+    payload = json.loads(path.read_text(encoding="utf-8"))
+    section = str(arguments.get("section", "receipt"))
+    if section == "receipt":
+        value: Any = _execution_receipt(payload)
+    elif section == "output":
+        value = (payload.get("event") or {}).get("result", "")
+    elif section == "events":
+        value = payload.get("events", [])
+    elif section == "delivery":
+        value = payload.get("delivery_receipt")
+    else:
+        raise ValueError("section must be receipt, output, events, or delivery")
+    encoded = json.dumps(value, separators=(",", ":"), default=str)
+    cursor = max(int(arguments.get("cursor", 0)), 0)
+    max_chars = min(max(int(arguments.get("max_chars", 8_000)), 256), 12_000)
+    chunk = encoded[cursor : cursor + max_chars]
+    next_cursor = cursor + len(chunk) if cursor + len(chunk) < len(encoded) else None
+    return {
+        "execution_id": artifact_id,
+        "section": section,
+        "cursor": cursor,
+        "content": chunk,
+        "next_cursor": next_cursor,
+        "total_chars": len(encoded),
+        "sha256": hashlib.sha256(encoded.encode("utf-8")).hexdigest(),
+    }
 
 
 def _bounded_json_text(payload: dict, max_chars: int = MAX_TOOL_RESULT_CHARS) -> str:
@@ -655,9 +877,9 @@ TOOLS = [
         "name": "factorio_observe_factory",
         "description": (
             "Direct read of the current Factorio factory state: inventory, "
-            "production statistics, open customer contracts with fulfilled and "
-            "remaining quantities and authoritative completion_ratio (windowed "
-            "for sustained orders), authoritative customer_depots with exact "
+            "production statistics, open production targets with explicit "
+            "target_rate_per_minute and autonomous qualification status, "
+            "authoritative customer_depots with exact "
             "sink positions, blueprint library, ticks, and state hash. Safe to "
             "request concurrently with other "
             "calls; envd still serializes operations for one lease."
@@ -697,9 +919,14 @@ TOOLS = [
             "source order and count as one environment intervention. Available "
             "names include inspect_inventory, get_entities, "
             "nearest (with a specific Resource.X or Prototype.X), move_to, "
-            "harvest_resource, craft_item, place_entity, wait, "
+            "harvest_resource, submit_actions, inspect_action_queue, resume_actions, "
+            "cancel_actions, insert_actions, queue_craft, get_craft_queue, cancel_craft, queue_research, "
+            "craft_item, place_entity, place_path, place_grid, repeat_pattern, wait, "
             "place_entity_next_to, insert_item, extract_item, set_entity_recipe, "
-            "connect_entities, get_resource_patch, set_research, sleep, print. "
+            "transfer_item, place_between, place_power_line, resolve_entity, "
+            "get_entity_ports, place_offshore_pump, get_resource_patch, "
+            "set_research, sleep, print. Planner-assisted connect_entities and "
+            "nearest_buildable are intentionally absent from the canonical profile. "
             "When insert_item is used, the result includes a delivery_receipt "
             "stating what the customer verifier credited and what remains. "
             "Do not emit MCP/network calls from the program. One intervention "
@@ -759,7 +986,12 @@ TOOLS = [
 ]
 
 
-def _read_only_tool(name: str, description: str, properties: dict[str, object], required: list[str] | None = None) -> dict[str, object]:
+def _read_only_tool(
+    name: str,
+    description: str,
+    properties: dict[str, object],
+    required: list[str] | None = None,
+) -> dict[str, object]:
     return {
         "name": name,
         "description": description,
@@ -782,6 +1014,74 @@ def _read_only_tool(name: str, description: str, properties: dict[str, object], 
 _BASE_TOOLS = list(TOOLS)
 TOOLS.extend(
     [
+        {
+            "name": "factorio_render_factory",
+            "description": (
+                "Render the current physical factory as a grounded PNG for "
+                "spatial inspection. Use it when belt/inserter direction, "
+                "machine layout, resource alignment, collisions, pipes, power, "
+                "or a stalled production path are easier to diagnose visually. "
+                "The response also includes the exact simulation tick and "
+                "world-coordinate viewport. This is an optional read-only view; "
+                "continue using structured tools for precise actions and facts."
+            ),
+            "inputSchema": {
+                "type": "object",
+                "properties": {
+                    "center_x": {
+                        "type": "number",
+                        "description": "Optional world X center; provide with center_y.",
+                    },
+                    "center_y": {
+                        "type": "number",
+                        "description": "Optional world Y center; provide with center_x.",
+                    },
+                    "radius": {
+                        "type": "integer",
+                        "minimum": 8,
+                        "maximum": 96,
+                        "default": 32,
+                        "description": "Rendered radius in world tiles.",
+                    },
+                    "include_status": {
+                        "type": "boolean",
+                        "default": True,
+                        "description": "Overlay entity status and warnings.",
+                    },
+                },
+                "additionalProperties": False,
+            },
+            "annotations": {
+                "readOnlyHint": True,
+                "destructiveHint": False,
+                "idempotentHint": True,
+                "openWorldHint": False,
+            },
+        },
+        _read_only_tool(
+            "factorio_read_execution_result",
+            (
+                "Read a bounded section of a prior factorio_execute_program "
+                "artifact when its compact receipt is insufficient. Full results "
+                "are never injected automatically."
+            ),
+            {
+                "execution_id": {"type": "string"},
+                "section": {
+                    "type": "string",
+                    "enum": ["receipt", "output", "events", "delivery"],
+                    "default": "receipt",
+                },
+                "cursor": {"type": "integer", "minimum": 0, "default": 0},
+                "max_chars": {
+                    "type": "integer",
+                    "minimum": 256,
+                    "maximum": 12000,
+                    "default": 8000,
+                },
+            },
+            ["execution_id"],
+        ),
         _read_only_tool(
             "factorio_query_state",
             (
@@ -805,6 +1105,7 @@ TOOLS.extend(
                         "research",
                         "contracts",
                         "errors",
+                        "alerts",
                     ],
                 },
                 "item": {
@@ -863,9 +1164,17 @@ TOOLS.extend(
                 "query": {"type": "string", "description": "Terms to search for."},
                 "kinds": {
                     "type": "array",
-                    "items": {"type": "string", "enum": ["api", "recipe", "technology", "prototype"]},
+                    "items": {
+                        "type": "string",
+                        "enum": ["api", "recipe", "technology", "prototype"],
+                    },
                 },
-                "limit": {"type": "integer", "minimum": 1, "maximum": 100, "default": 20},
+                "limit": {
+                    "type": "integer",
+                    "minimum": 1,
+                    "maximum": 100,
+                    "default": 20,
+                },
                 "cursor": {"type": "string"},
             },
         ),
@@ -880,7 +1189,12 @@ TOOLS.extend(
                 "document_id": {"type": "string"},
                 "section": {"type": "string"},
                 "cursor": {"type": "string"},
-                "max_chars": {"type": "integer", "minimum": 1, "maximum": 60000, "default": 12000},
+                "max_chars": {
+                    "type": "integer",
+                    "minimum": 1,
+                    "maximum": 60000,
+                    "default": 12000,
+                },
             },
             ["document_id"],
         ),
@@ -919,7 +1233,12 @@ TOOLS.extend(
             "List current model-managed session memory entries by optional namespace prefix.",
             {
                 "prefix": {"type": "string", "default": ""},
-                "limit": {"type": "integer", "minimum": 1, "maximum": 100, "default": 50},
+                "limit": {
+                    "type": "integer",
+                    "minimum": 1,
+                    "maximum": 100,
+                    "default": 50,
+                },
                 "cursor": {"type": "string"},
             },
         ),
@@ -943,7 +1262,12 @@ TOOLS.extend(
                 "additionalProperties": False,
             },
             "outputSchema": {"type": "object", "additionalProperties": True},
-            "annotations": {"readOnlyHint": False, "destructiveHint": False, "idempotentHint": False, "openWorldHint": False},
+            "annotations": {
+                "readOnlyHint": False,
+                "destructiveHint": False,
+                "idempotentHint": False,
+                "openWorldHint": False,
+            },
         },
         {
             "name": "factorio_memory_delete",
@@ -958,14 +1282,24 @@ TOOLS.extend(
                 "additionalProperties": False,
             },
             "outputSchema": {"type": "object", "additionalProperties": True},
-            "annotations": {"readOnlyHint": False, "destructiveHint": True, "idempotentHint": False, "openWorldHint": False},
+            "annotations": {
+                "readOnlyHint": False,
+                "destructiveHint": True,
+                "idempotentHint": False,
+                "openWorldHint": False,
+            },
         },
         _read_only_tool(
             "factorio_memory_search",
             "Search model-managed session memory by key and content terms.",
             {
                 "query": {"type": "string", "minLength": 1},
-                "limit": {"type": "integer", "minimum": 1, "maximum": 100, "default": 20},
+                "limit": {
+                    "type": "integer",
+                    "minimum": 1,
+                    "maximum": 100,
+                    "default": 20,
+                },
                 "cursor": {"type": "string"},
             },
             ["query"],
@@ -974,10 +1308,53 @@ TOOLS.extend(
             "factorio_memory_trace",
             "Read the append-only trace of model memory writes and deletes for this session.",
             {
-                "limit": {"type": "integer", "minimum": 1, "maximum": 1000, "default": 100},
+                "limit": {
+                    "type": "integer",
+                    "minimum": 1,
+                    "maximum": 1000,
+                    "default": 100,
+                },
                 "cursor": {"type": "string"},
             },
         ),
+    ]
+)
+
+TOOLS.extend(
+    [
+        _read_only_tool(
+            "factorio_get_craft_plan",
+            "Read the handcrafting menu: native craftable item count, required/available/missing ingredients, and bounded independent subrecipes. Does not craft or advance time.",
+            {
+                "product": {"type": "string"},
+                "quantity": {
+                    "type": "integer",
+                    "minimum": 1,
+                    "maximum": 1000000,
+                    "default": 1,
+                },
+                "depth": {"type": "integer", "minimum": 0, "maximum": 3, "default": 2},
+            },
+            ["product"],
+        ),
+        _read_only_tool(
+            "factorio_get_camera",
+            "Read the persistent camera PNG, coarse terrain and nearby machine tooltips. Camera is enabled by default.",
+            {},
+        ),
+        {
+            "name": "factorio_set_camera",
+            "description": "Set persistent camera radius, entity cap or opt out. Settings survive reconnects and checkpoints; this does not move the character or advance time.",
+            "inputSchema": {
+                "type": "object",
+                "properties": {
+                    "enabled": {"type": "boolean"},
+                    "radius": {"type": "integer", "minimum": 8, "maximum": 192},
+                    "entity_limit": {"type": "integer", "minimum": 1, "maximum": 128},
+                },
+                "additionalProperties": False,
+            },
+        },
     ]
 )
 
@@ -997,18 +1374,97 @@ MEMORY_TOOL_NAMES = {
     "factorio_memory_trace",
 }
 
+EXCLUSIVE_TOOL_NAMES = {
+    "factorio_set_camera",
+    "factorio_execute_program",
+    "factorio_check_throughput",
+    "factorio_memory_write",
+    "factorio_memory_delete",
+}
+SERIAL_LIVE_READ_TOOL_NAMES = {
+    "factorio_get_craft_plan",
+    "factorio_get_camera",
+    "factorio_observe_factory",
+    "factorio_query_state",
+    "factorio_render_factory",
+}
+
+
+def _tool_route(name: str) -> dict[str, Any]:
+    if any(name.endswith(candidate) for candidate in EXCLUSIVE_TOOL_NAMES):
+        return {
+            "route": "exclusive_mutation",
+            "parallel_safe": False,
+            "provider_ptc_eligible": False,
+        }
+    if any(name.endswith(candidate) for candidate in SERIAL_LIVE_READ_TOOL_NAMES):
+        return {
+            "route": "serial_live_read",
+            "parallel_safe": False,
+            "provider_ptc_eligible": False,
+        }
+    return {
+        "route": "parallel_read",
+        "parallel_safe": True,
+        "provider_ptc_eligible": True,
+    }
+
+
+def tool_route_manifest(*, memory_enabled: bool | None = None) -> dict[str, Any]:
+    enabled = _memory_enabled() if memory_enabled is None else memory_enabled
+    tools = [
+        tool for tool in ALL_TOOLS if enabled or tool["name"] not in MEMORY_TOOL_NAMES
+    ]
+    return {
+        "schema_version": "factorio-tool-routes-v1",
+        "provider_native_ptc_supported": False,
+        "per_lease_serial_execution": True,
+        "routes": {tool["name"]: _tool_route(tool["name"]) for tool in tools},
+    }
+
 
 def tools_for_profile(*, memory_enabled: bool | None = None) -> list[dict]:
     """Return the exact manifest exposed by the selected evaluation profile."""
     enabled = _memory_enabled() if memory_enabled is None else memory_enabled
-    if enabled:
-        return list(ALL_TOOLS)
-    return [tool for tool in ALL_TOOLS if tool["name"] not in MEMORY_TOOL_NAMES]
+    selected = (
+        list(ALL_TOOLS)
+        if enabled
+        else [tool for tool in ALL_TOOLS if tool["name"] not in MEMORY_TOOL_NAMES]
+    )
+    result = []
+    for tool in selected:
+        decorated = dict(tool)
+        decorated["_meta"] = {
+            **dict(tool.get("_meta") or {}),
+            "factorio/toolRoute": _tool_route(tool["name"]),
+        }
+        result.append(decorated)
+    return result
 
 
-def _mcp_tool_result(text: str, is_error: bool) -> dict:
+def _mcp_tool_result(text: str | dict[str, Any], is_error: bool) -> dict:
     """Build a MCP result with structured content when the envd response is JSON."""
 
+    if isinstance(text, dict) and isinstance(text.get("image_base64"), str):
+        metadata = {key: value for key, value in text.items() if key != "image_base64"}
+        return {
+            "content": [
+                {
+                    "type": "text",
+                    "text": json.dumps(metadata, separators=(",", ":")),
+                },
+                {
+                    "type": "image",
+                    "data": text["image_base64"],
+                    "mimeType": str(text.get("media_type", "image/png")),
+                },
+            ],
+            "structuredContent": metadata,
+            "isError": is_error,
+        }
+
+    if isinstance(text, dict):
+        text = _bounded_json_text(text)
     result = {
         "content": [{"type": "text", "text": text}],
         "isError": is_error,
@@ -1046,10 +1502,15 @@ def _reference_call(name: str, arguments: dict[str, object]) -> dict:
             kinds=requested - {"api"} if requested else None,
             limit=100,
         )["results"]
-        results = sorted(api_results + game_results, key=lambda item: (item.get("kind", ""), item.get("canonical_id", "")))
+        results = sorted(
+            api_results + game_results,
+            key=lambda item: (item.get("kind", ""), item.get("canonical_id", "")),
+        )
         from fle.envd.knowledge import _paginate
 
-        page, next_cursor = _paginate(results, int(arguments.get("limit", 20)), arguments.get("cursor"))
+        page, next_cursor = _paginate(
+            results, int(arguments.get("limit", 20)), arguments.get("cursor")
+        )
         return {
             "schema_version": "knowledge-reference-v1",
             "api_reference_id": "fle-api-reference-v1",
@@ -1062,12 +1523,21 @@ def _reference_call(name: str, arguments: dict[str, object]) -> dict:
         }
     if name == "factorio_read_reference":
         document_id = str(arguments["document_id"])
-        if document_id.startswith("api/") or document_id.startswith("api:") or not any(
-            document_id.startswith(prefix) for prefix in ("recipe:", "technology:", "prototype:")
+        if (
+            document_id.startswith("api/")
+            or document_id.startswith("api:")
+            or not any(
+                document_id.startswith(prefix)
+                for prefix in ("recipe:", "technology:", "prototype:")
+            )
         ):
             return api.read(
                 document_id,
-                section=(str(arguments["section"]) if arguments.get("section") is not None else None),
+                section=(
+                    str(arguments["section"])
+                    if arguments.get("section") is not None
+                    else None
+                ),
                 cursor=arguments.get("cursor"),
                 max_chars=int(arguments.get("max_chars", 12000)),
             )
@@ -1181,6 +1651,95 @@ def _state_query_call(name: str, arguments: dict[str, object]) -> dict:
     )
 
 
+def _render_factory_call(arguments: dict[str, object]) -> dict[str, Any]:
+    """Fetch and persist one grounded live rendering without text-encoding it."""
+
+    global _render_call_sequence
+    lease_id = os.environ.get("LEASE_ID", "")
+    center_x = arguments.get("center_x")
+    center_y = arguments.get("center_y")
+    if (center_x is None) != (center_y is None):
+        raise ValueError("center_x and center_y must be provided together")
+    payload = _envd(
+        "GET",
+        _query_path(
+            f"/v1/leases/{lease_id}/render",
+            {
+                "center_x": center_x,
+                "center_y": center_y,
+                "radius": arguments.get("radius", 32),
+                "include_status": str(
+                    bool(arguments.get("include_status", True))
+                ).lower(),
+            },
+        ),
+    )
+    encoded = payload.get("image_base64")
+    if not isinstance(encoded, str) or not encoded:
+        raise RuntimeError("envd render response did not include a PNG image")
+    png = base64.b64decode(encoded, validate=True)
+    _render_call_sequence += 1
+    render_id = f"render-{_render_call_sequence}-{hashlib.sha256(png).hexdigest()[:16]}"
+    directory = _tool_artifact_dir()
+    if directory is not None:
+        render_dir = directory / "renders"
+        render_dir.mkdir(parents=True, exist_ok=True)
+        (render_dir / f"{render_id}.png").write_bytes(png)
+        metadata = {
+            key: value for key, value in payload.items() if key != "image_base64"
+        }
+        (render_dir / f"{render_id}.json").write_text(
+            json.dumps(metadata, indent=2, sort_keys=True) + "\n",
+            encoding="utf-8",
+        )
+    payload["artifact"] = {
+        "id": render_id,
+        "sha256": hashlib.sha256(png).hexdigest(),
+        "png_bytes": len(png),
+        "retrievable": directory is not None,
+    }
+    return payload
+
+
+def _camera_call(settings: dict[str, Any] | None = None) -> dict[str, Any]:
+    lease_id = os.environ.get("LEASE_ID", "")
+    payload = _envd(
+        "POST" if settings is not None else "GET",
+        f"/v1/leases/{lease_id}/camera",
+        settings,
+    )
+    directory = _tool_artifact_dir()
+    if directory is not None:
+        from fle.envd.camera import persist_camera_snapshot
+
+        payload = persist_camera_snapshot(directory, payload)
+    return payload
+
+
+def _with_camera(text: str) -> str | dict[str, Any]:
+    """Attach current vision after world calls; failed vision cannot hide receipts."""
+    try:
+        payload = json.loads(text)
+        if not isinstance(payload, dict):
+            payload = {"receipt": text}
+    except json.JSONDecodeError:
+        payload = {"receipt": text}
+    try:
+        camera = _camera_call()
+    except Exception as exc:
+        return {**payload, "camera": {"available": False, "error": str(exc)[:300]}}
+    objective = camera.pop("objective", None)
+    if objective:
+        payload["objective"] = objective
+    if camera.get("enabled") is False:
+        return _bounded_json_text(payload) if objective else text
+    encoded = camera.pop("image_base64", None)
+    payload["camera"] = camera
+    if encoded:
+        payload.update(image_base64=encoded, media_type="image/png")
+    return payload
+
+
 def _negotiate_protocol_version(requested: object) -> str:
     """Select a client-supported MCP revision without rejecting older clients."""
 
@@ -1194,10 +1753,18 @@ def _call_tool(
     arguments: dict,
     *,
     request_id: object | None = None,
-) -> tuple[str, bool]:
+) -> tuple[str | dict[str, Any], bool]:
     lease_id = os.environ.get("LEASE_ID", "")
     _trace(f"tools/call name={name!r} args={json.dumps(arguments, default=str)[:200]}")
     try:
+        if _terminal_finalization_only() and not any(
+            name.endswith(memory_tool) for memory_tool in MEMORY_TOOL_NAMES
+        ):
+            return (
+                "error: the contract is terminal; only factorio_memory_* tools "
+                "are available during the bounded handoff phase",
+                True,
+            )
         reference_name = next(
             (
                 candidate
@@ -1233,10 +1800,24 @@ def _call_tool(
         )
         if memory_name is not None:
             return _bounded_json_text(_memory_call(memory_name, arguments)), False
+        if name.endswith("factorio_read_execution_result"):
+            return _bounded_json_text(_read_execution_artifact(arguments)), False
         if name.endswith("factorio_query_state"):
             return _bounded_json_text(
                 _state_query_call("factorio_query_state", arguments)
             ), False
+        if name.endswith("factorio_render_factory"):
+            return _render_factory_call(arguments), False
+        if name.endswith("factorio_get_camera"):
+            return _camera_call(), False
+        if name.endswith("factorio_get_craft_plan"):
+            return _bounded_json_text(
+                _envd(
+                    "GET", _query_path(f"/v1/leases/{lease_id}/craft-plan", arguments)
+                )
+            ), False
+        if name.endswith("factorio_set_camera"):
+            return _camera_call(arguments), False
         if name.endswith("factorio_observe_factory"):
             observation = _envd(
                 "GET",
@@ -1260,7 +1841,10 @@ def _call_tool(
                 _signal_epoch_terminal(
                     f"contract_{adaptive_order.get('status')}", observation
                 )
-            return _bounded_json_text(observation), False
+            # Terrain/tooltips accompany the image rather than duplicating the
+            # persistent camera state inside the bounded observation text.
+            observation.pop("camera_state", None)
+            return _with_camera(_bounded_json_text(observation)), False
         if name.endswith("factorio_check_throughput"):
             payload = {}
             if request_id is not None:
@@ -1307,6 +1891,43 @@ def _call_tool(
                 f"/v1/leases/{lease_id}/execute",
                 execute_payload,
             )
+            resume_pointer = os.environ.get("FACTORIO_RESUME_POINTER_FILE")
+            if (
+                resume_pointer
+                and os.environ.get("FACTORIO_CHECKPOINT_EVERY", "1") != "0"
+            ):
+                try:
+                    sequence = (result.get("event") or {}).get("sequence", "unknown")
+                    checkpoint = _envd(
+                        "POST",
+                        f"/v1/leases/{lease_id}/checkpoints",
+                        {"name": f"mcp-active-{lease_id[:12]}"},
+                    )
+                    result["resume_checkpoint"] = checkpoint
+                    pointer_path = Path(resume_pointer)
+                    pointer_path.parent.mkdir(parents=True, exist_ok=True)
+                    temporary = pointer_path.with_suffix(pointer_path.suffix + ".tmp")
+                    temporary.write_text(
+                        json.dumps(
+                            {
+                                "schema_version": "factorio-resume-pointer-v1",
+                                "checkpoint": checkpoint,
+                                "execution_id": _execution_artifact_id(result),
+                                "sequence": sequence,
+                                "evaluation_progress": result.get(
+                                    "evaluation_progress"
+                                ),
+                            },
+                            indent=2,
+                            sort_keys=True,
+                        )
+                        + "\n",
+                        encoding="utf-8",
+                    )
+                    os.replace(temporary, pointer_path)
+                except Exception as exc:  # execution itself already committed
+                    result["resume_checkpoint_error"] = f"{type(exc).__name__}: {exc}"
+                    _trace(f"post-execution checkpoint failed: {exc}")
             event_failed = bool((result.get("event") or {}).get("error"))
             failure_count = _record_execution_result(fingerprint, event_failed)
             if result.get("terminal_reason"):
@@ -1323,16 +1944,55 @@ def _call_tool(
                 )
                 if adaptive_terminal:
                     _signal_epoch_terminal(str(adaptive_terminal), result)
-            text = _bounded_json_text(result)
+            text = _bounded_json_text(
+                _execution_receipt(result), max_chars=MAX_EXECUTION_RECEIPT_CHARS
+            )
             if event_failed and failure_count >= REPEATED_FAILURE_LIMIT:
                 text += "\n\n" + _repetition_error(failure_count)
-            return text, event_failed
+            return _with_camera(text), event_failed
         return f"error: unknown tool {name}", True
     except Exception as exc:  # noqa: BLE001 - surfaced to the model as text
         return f"tool error: {type(exc).__name__}: {exc}", True
 
 
+def _write_response(message: dict[str, object], lock: threading.Lock) -> None:
+    with lock:
+        sys.stdout.write(json.dumps(message) + "\n")
+        sys.stdout.flush()
+
+
 def main() -> None:
+    output_lock = threading.Lock()
+    read_pool = concurrent.futures.ThreadPoolExecutor(
+        max_workers=max(int(os.environ.get("FACTORIO_MCP_READ_WORKERS", "4")), 1),
+        thread_name_prefix="factorio-mcp-read",
+    )
+    pending_reads: set[concurrent.futures.Future[tuple[str | dict[str, Any], bool]]] = (
+        set()
+    )
+    pending_lock = threading.Lock()
+
+    def finish_read(
+        future: concurrent.futures.Future[tuple[str | dict[str, Any], bool]],
+        msg_id: object,
+    ) -> None:
+        with pending_lock:
+            pending_reads.discard(future)
+        try:
+            text, is_error = future.result()
+            response: dict[str, object] = {
+                "jsonrpc": "2.0",
+                "id": msg_id,
+                "result": _mcp_tool_result(text, is_error),
+            }
+        except Exception as exc:  # pragma: no cover - process boundary
+            response = {
+                "jsonrpc": "2.0",
+                "id": msg_id,
+                "error": {"code": -32603, "message": str(exc)},
+            }
+        _write_response(response, output_lock)
+
     for raw_line in sys.stdin:
         line = raw_line.strip()
         if not line:
@@ -1354,9 +2014,9 @@ def main() -> None:
                     "This lease-bound server exposes direct observe/execute, "
                     "bounded public state retrieval, "
                     "callable API/game-data reference, and optional session "
-                    "memory tools. Its stdio dispatcher is a FIFO queue; envd accepts "
-                    "concurrent HTTP requests but serializes all operations for "
-                    "one lease. Use the execute tool's code argument for "
+                    "memory tools. Independent reference and artifact reads may run "
+                    "in parallel; live reads and mutations are ordered at the lease "
+                    "boundary. Use the execute tool's code argument for "
                     "synchronous programmatic FLE action composition. Memory is "
                     "disabled unless MEMORY_ENABLED is set by the evaluation profile."
                 ),
@@ -1365,8 +2025,28 @@ def main() -> None:
             result = {"tools": tools_for_profile()}
         elif method == "tools/call":
             params = message.get("params") or {}
+            tool_name = str(params.get("name"))
+            if _tool_route(tool_name)["route"] == "parallel_read":
+                future = read_pool.submit(
+                    _call_tool,
+                    tool_name,
+                    params.get("arguments") or {},
+                    request_id=msg_id,
+                )
+                with pending_lock:
+                    pending_reads.add(future)
+                future.add_done_callback(
+                    lambda completed, request_id=msg_id: finish_read(
+                        completed, request_id
+                    )
+                )
+                continue
+            with pending_lock:
+                reads_to_wait = tuple(pending_reads)
+            if reads_to_wait:
+                concurrent.futures.wait(reads_to_wait)
             text, is_error = _call_tool(
-                str(params.get("name")),
+                tool_name,
                 params.get("arguments") or {},
                 request_id=msg_id,
             )
@@ -1395,8 +2075,8 @@ def main() -> None:
                 "id": msg_id,
                 "error": {"code": -32601, "message": f"unknown method {method}"},
             }
-        sys.stdout.write(json.dumps(response) + "\n")
-        sys.stdout.flush()
+        _write_response(response, output_lock)
+    read_pool.shutdown(wait=True)
 
 
 if __name__ == "__main__":

@@ -17,13 +17,13 @@ from pathlib import Path
 from typing import Any, Iterable
 
 API_REFERENCE_VERSION = "fle-api-reference-v1"
-GAME_DATA_REFERENCE_VERSION = "factorio-game-data-reference-v1"
+GAME_DATA_REFERENCE_VERSION = "factorio-game-data-reference-v2"
 REFERENCE_SCHEMA_VERSION = "knowledge-reference-v1"
 DEFAULT_GAME_DATA_FILE = (
     Path(__file__).resolve().parents[2]
     / "benchmark"
     / "data"
-    / "factorio-2.0.73-contract-game-data.json"
+    / "factorio-2.0.77-contract-game-data.json"
 )
 
 
@@ -36,7 +36,9 @@ def _canonical(value: Any) -> str:
 
 
 def _tokens(value: str) -> set[str]:
-    return {token for token in re.findall(r"[a-z0-9][a-z0-9_-]*", value.lower()) if token}
+    return {
+        token for token in re.findall(r"[a-z0-9][a-z0-9_-]*", value.lower()) if token
+    }
 
 
 def _query_matches(query_tokens: set[str], searchable_tokens: set[str]) -> bool:
@@ -56,7 +58,9 @@ def _cursor_value(cursor: str | int | None) -> int:
         raise ValueError("cursor must be a non-negative integer") from None
 
 
-def _paginate(values: list[Any], limit: int, cursor: str | int | None) -> tuple[list[Any], str | None]:
+def _paginate(
+    values: list[Any], limit: int, cursor: str | int | None
+) -> tuple[list[Any], str | None]:
     if limit < 1 or limit > 100:
         raise ValueError("limit must be between 1 and 100")
     start = _cursor_value(cursor)
@@ -106,7 +110,11 @@ class ApiReference:
                 relative = path.relative_to(tools_root).as_posix()
                 # Keep the root manual stable and expose nested tool manuals by
                 # their complete path so admin and agent surfaces cannot collide.
-                stem = relative[:-len("/agent.md")] if relative.endswith("/agent.md") else relative[:-len(".md")]
+                stem = (
+                    relative[: -len("/agent.md")]
+                    if relative.endswith("/agent.md")
+                    else relative[: -len(".md")]
+                )
                 document_id = "api/overview" if stem == "agent" else f"api/{stem}"
                 content = path.read_text(encoding="utf-8")
                 documents[document_id] = ReferenceDocument(
@@ -230,7 +238,9 @@ class ApiReference:
             raise ValueError("max_chars must be between 1 and 60000")
         start = _cursor_value(cursor)
         chunk = content[start : start + max_chars]
-        next_cursor = str(start + max_chars) if start + max_chars < len(content) else None
+        next_cursor = (
+            str(start + max_chars) if start + max_chars < len(content) else None
+        )
         return {
             "schema_version": REFERENCE_SCHEMA_VERSION,
             "reference_id": API_REFERENCE_VERSION,
@@ -366,7 +376,10 @@ class GameDataReference:
             candidates = [
                 value
                 for value in self.recipes.values()
-                if any(str(product.get("name")) == identifier for product in value.get("products", []) or [])
+                if any(
+                    str(product.get("name")) == identifier
+                    for product in value.get("products", []) or []
+                )
             ]
             if len(candidates) == 1:
                 recipe = candidates[0]
@@ -411,7 +424,13 @@ class GameDataReference:
             if technology_id in closure:
                 continue
             closure.add(technology_id)
-            stack.extend(str(item) for item in self.technologies.get(technology_id, {}).get("prerequisites", []) or [])
+            stack.extend(
+                str(item)
+                for item in self.technologies.get(technology_id, {}).get(
+                    "prerequisites", []
+                )
+                or []
+            )
         path = {
             "recipe_id": recipe_id,
             "product_ids": sorted(
@@ -429,7 +448,10 @@ class GameDataReference:
             "prerequisites": {
                 technology_id: sorted(
                     str(item)
-                    for item in self.technologies.get(technology_id, {}).get("prerequisites", []) or []
+                    for item in self.technologies.get(technology_id, {}).get(
+                        "prerequisites", []
+                    )
+                    or []
                 )
                 for technology_id in sorted(closure)
             },
@@ -486,7 +508,11 @@ class GameDataReference:
         value = prototypes.get(identifier) if isinstance(prototypes, dict) else None
         if value is None and isinstance(prototypes, list):
             value = next(
-                (item for item in prototypes if isinstance(item, dict) and item.get("name") == identifier),
+                (
+                    item
+                    for item in prototypes
+                    if isinstance(item, dict) and item.get("name") == identifier
+                ),
                 None,
             )
         if value is None:
@@ -520,17 +546,30 @@ class GameDataReference:
             datasets.append(("prototype", prototypes.items()))
         elif isinstance(prototypes, list):
             datasets.append(
-                ("prototype", ((str(item.get("name")), item) for item in prototypes if isinstance(item, dict) and item.get("name")))
+                (
+                    "prototype",
+                    (
+                        (str(item.get("name")), item)
+                        for item in prototypes
+                        if isinstance(item, dict) and item.get("name")
+                    ),
+                )
             )
         for kind, values in datasets:
             if requested and kind not in requested:
                 continue
             for identifier, value in values:
                 text = _canonical(value)
-                aliases = self._recipe_aliases(str(identifier)) if kind == "recipe" else ()
-                if not _query_matches(q, _tokens(f"{identifier} {' '.join(aliases)} {text}")):
+                aliases = (
+                    self._recipe_aliases(str(identifier)) if kind == "recipe" else ()
+                )
+                if not _query_matches(
+                    q, _tokens(f"{identifier} {' '.join(aliases)} {text}")
+                ):
                     continue
-                records.append({"kind": kind, "canonical_id": identifier, "title": identifier})
+                records.append(
+                    {"kind": kind, "canonical_id": identifier, "title": identifier}
+                )
         records.sort(key=lambda item: (item["kind"], item["canonical_id"]))
         page, next_cursor = _paginate(records, limit, cursor)
         return {
@@ -545,7 +584,11 @@ class GameDataReference:
 
 
 _MACHINE_CATEGORY_DEFAULTS: dict[str, list[str]] = {
-    "crafting": ["assembling-machine-1", "assembling-machine-2", "assembling-machine-3"],
+    "crafting": [
+        "assembling-machine-1",
+        "assembling-machine-2",
+        "assembling-machine-3",
+    ],
     "advanced-crafting": ["assembling-machine-2", "assembling-machine-3"],
     "smelting": ["stone-furnace", "steel-furnace", "electric-furnace"],
     "chemistry": ["chemical-plant"],

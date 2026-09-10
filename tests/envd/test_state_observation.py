@@ -2,6 +2,8 @@ from types import SimpleNamespace
 
 import pytest
 
+from fle.env.entities import Position
+from fle.env.game_types import Prototype
 from fle.envd.backend import FLEWorker
 from fle.envd.models import DepotDeliveryTelemetry
 
@@ -30,6 +32,23 @@ class _StateNamespace:
         assert compact is True
         return self.research
 
+    def get_entities(self, prototype=None, **kwargs):
+        assert prototype is Prototype.AssemblingMachine1
+        assert kwargs == {}
+        return [_EntityRecord()]
+
+
+class _EntityRecord:
+    def model_dump(self):
+        return {
+            "name": "assembling-machine-1",
+            "prototype": Prototype.AssemblingMachine1,
+            "status": "working",
+            "position": Position(x=4, y=-2),
+            "recipe": "transport-belt",
+            "inventory": {"iron-plate": 10_000},
+        }
+
 
 class _StateInstance:
     def __init__(self, namespace):
@@ -43,7 +62,9 @@ def _worker():
     namespace = _StateNamespace()
     worker = FLEWorker.__new__(FLEWorker)
     worker.instance = _StateInstance(namespace)
-    worker.task_spec = SimpleNamespace(task_id="state-task")
+    worker.task_spec = SimpleNamespace(
+        task_id="state-task", goal="Inspect factory state", evaluation_mode=None
+    )
     worker._contracts_view = lambda: []
     worker._sync_customer = lambda: []
     worker._sync_active_order = lambda: []
@@ -88,8 +109,6 @@ def test_observe_emits_absolute_inventory_and_revisioned_delta():
     namespace.research = {
         "researched": {"automation": 1, "logistics": 1},
     }
-    worker._research_cache = None
-
     second = worker.observe("lease-1", cursor=first.cursor)
     assert second.cursor == "testnonce.2"
     assert second.is_keyframe is False
@@ -117,9 +136,7 @@ def test_observe_emits_absolute_inventory_and_revisioned_delta():
     assert production_history["samples"][-1]["revision"] == 2
     assert production_history["samples"][-1]["output"] == {"iron-plate": 120}
 
-    research_history = worker.query_state(
-        "lease-1", kind="research", since_revision=1
-    )
+    research_history = worker.query_state("lease-1", kind="research", since_revision=1)
     assert research_history["changes"] == [
         {
             "revision": 2,
@@ -129,13 +146,35 @@ def test_observe_emits_absolute_inventory_and_revisioned_delta():
         }
     ]
 
-    entity_history = worker.query_state(
-        "lease-1", kind="entities", changed_since=1
-    )
+    entity_history = worker.query_state("lease-1", kind="entities", changed_since=1)
     assert entity_history["mutations"][-1]["changed"]["assembling-machine-1"] == {
         "before": 1,
         "after": 2,
     }
+
+
+def test_filtered_entity_query_serializes_pydantic_prototype_classes():
+    worker, _ = _worker()
+    worker.observe("lease-1")
+
+    result = worker.query_state(
+        "lease-1",
+        kind="entities",
+        entity_type="assembling-machine-1",
+        limit=4,
+    )
+
+    assert result["returned"] == 1
+    assert result["entities"] == [
+        {
+            "name": "assembling-machine-1",
+            "prototype": "assembling-machine-1",
+            "status": "working",
+            "position": {"x": 4.0, "y": -2.0},
+            "recipe": "transport-belt",
+        }
+    ]
+    assert "error" not in result
 
 
 def test_stale_cursor_falls_back_to_keyframe_and_public_history_is_compact():
@@ -155,15 +194,31 @@ def test_stale_cursor_falls_back_to_keyframe_and_public_history_is_compact():
     assert "inventory" not in worker._public_state_history[1]
 
 
+def test_state_delta_accepts_json_restored_error_key_lists():
+    before = {
+        "revision": 1,
+        "errors": {"_keys": ["1:old"], "distinct": []},
+    }
+    after = {
+        "revision": 2,
+        "errors": {
+            "_keys": ["1:old", "2:new"],
+            "distinct": [{"sequence": 2, "result": "new"}],
+        },
+    }
+
+    delta = FLEWorker._state_delta(before, after, 2)
+
+    assert delta["errors"]["new"] == [{"sequence": 2, "result": "new"}]
+
+
 def test_delivery_ledger_is_not_lost_when_recent_observation_projection_is_bounded():
     worker, _ = _worker()
     worker._delivery_history = []
     worker._delivery_raw_totals = {}
 
     for tick in range(1100):
-        worker._record_delivery_samples(
-            {"tick": tick}, [(tick, {"iron-plate": 1.0})]
-        )
+        worker._record_delivery_samples({"tick": tick}, [(tick, {"iron-plate": 1.0})])
 
     assert len(worker._delivery_history) == 1100
     assert worker._delivery_history[0] == (0, {"iron-plate": 1.0})

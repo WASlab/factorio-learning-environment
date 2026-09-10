@@ -34,7 +34,6 @@ def _empty_table_as_list(value: Any) -> Any:
 
 def export_game_data(host: str, port: int, password: str) -> dict[str, Any]:
     client = RCONClient(host, port, password)
-    client.connect()
     try:
         version = _json_command(
             client,
@@ -59,9 +58,7 @@ def export_game_data(host: str, port: int, password: str) -> dict[str, Any]:
             quoted = _lua_string(name)
             recipe = _json_command(
                 client,
-                "local r=prototypes.recipe["
-                + quoted
-                + "] local i={} local p={} "
+                "local r=prototypes.recipe[" + quoted + "] local i={} local p={} "
                 "for _,v in pairs(r.ingredients) do table.insert(i,{"
                 "name=v.name,amount=v.amount,type=v.type}) end "
                 "for _,v in pairs(r.products) do local a=v.amount "
@@ -81,9 +78,7 @@ def export_game_data(host: str, port: int, password: str) -> dict[str, Any]:
             quoted = _lua_string(name)
             technology = _json_command(
                 client,
-                "local t=prototypes.technology["
-                + quoted
-                + "] local p={} local u={} "
+                "local t=prototypes.technology[" + quoted + "] local p={} local u={} "
                 "for n,_ in pairs(t.prerequisites) do table.insert(p,n) end "
                 "for _,e in pairs(t.effects) do if e.type=='unlock-recipe' "
                 "then table.insert(u,e.recipe) end end table.sort(p) "
@@ -91,7 +86,8 @@ def export_game_data(host: str, port: int, password: str) -> dict[str, Any]:
                 "if type(count)~='number' then count=1 end "
                 "rcon.print(helpers.table_to_json({name=t.name,"
                 "prerequisites=p,unlocked_recipes=u,unit_count=count,"
-                "unit_energy=t.research_unit_energy}))",
+                "unit_energy=t.research_unit_energy,"
+                "research_trigger=t.research_trigger}))",
             )
             technology["prerequisites"] = _empty_table_as_list(
                 technology.get("prerequisites")
@@ -135,9 +131,9 @@ def main() -> int:
     args = parser.parse_args()
     payload = export_game_data(args.host, args.port, args.password)
     args.output.parent.mkdir(parents=True, exist_ok=True)
-    args.output.write_text(
-        json.dumps(payload, indent=2, sort_keys=True) + "\n", encoding="utf-8"
-    )
+    with args.output.open("w", encoding="utf-8", newline="\n") as stream:
+        json.dump(payload, stream, indent=2, sort_keys=True)
+        stream.write("\n")
     print(
         f"wrote {len(payload['recipes'])} recipes and "
         f"{len(payload['technologies'])} technologies to {args.output}"

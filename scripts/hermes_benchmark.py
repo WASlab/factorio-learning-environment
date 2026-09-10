@@ -346,23 +346,23 @@ def _run_hermes(
         "--yolo",
     ]
     if resume_latest:
-        command.extend(
-            ["--resume", "latest", "--in", str(scratch), "--no-restore-cwd"]
-        )
-    command.extend([
-        "-z",
-        prompt,
-        "--usage-file",
-        str(usage_file),
-        "--provider",
-        "openrouter",
-        "-m",
-        model,
-        "--reasoning",
-        str(args.reasoning),
-        "--toolsets",
-        toolsets,
-    ])
+        command.extend(["--resume", "latest", "--in", str(scratch), "--no-restore-cwd"])
+    command.extend(
+        [
+            "-z",
+            prompt,
+            "--usage-file",
+            str(usage_file),
+            "--provider",
+            "openrouter",
+            "-m",
+            model,
+            "--reasoning",
+            str(args.reasoning),
+            "--toolsets",
+            toolsets,
+        ]
+    )
     creationflags = getattr(subprocess, "CREATE_NEW_PROCESS_GROUP", 0)
     popen_kwargs: dict[str, Any] = {
         "cwd": str(scratch),
@@ -486,6 +486,11 @@ def _write_hermes_profile(
         "ENVD_URL": envd_url,
         "LEASE_ID": lease_id,
         "MCP_TRACE_FILE": str(trace_file),
+        "FACTORIO_TOOL_ARTIFACT_DIR": str(trace_file.parent / "tool-results"),
+        "FACTORIO_RESUME_POINTER_FILE": str(
+            trace_file.parent / "resume" / "world-checkpoint.json"
+        ),
+        "FACTORIO_CHECKPOINT_EVERY": "1",
         "FACTORIO_GAME_DATA_FILE": str(game_data_path or ""),
         "MEMORY_PATH": str(memory_path or ""),
         "MEMORY_ENABLED": "1" if memory_enabled else "0",
@@ -791,9 +796,7 @@ async def run_attempt(
         "contracts_fulfilled": float(
             snapshot.metrics.get("customer_orders_fulfilled", 0.0)
         ),
-        "contracts_total": float(
-            snapshot.metrics.get("customer_orders_total", 0.0)
-        ),
+        "contracts_total": float(snapshot.metrics.get("customer_orders_total", 0.0)),
         "usage": usage,
         "final_inventory": (
             dict(snapshot.privileged_diagnostics.inventory)

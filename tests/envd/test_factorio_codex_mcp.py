@@ -1,4 +1,5 @@
 import json
+import base64
 import urllib.error
 
 import pytest
@@ -9,7 +10,10 @@ pytestmark = pytest.mark.no_factorio
 
 
 @pytest.fixture(autouse=True)
-def reset_repetition_state():
+def reset_repetition_state(monkeypatch):
+    monkeypatch.setattr(
+        factorio_codex_mcp, "_camera_call", lambda settings=None: {"enabled": False}
+    )
     factorio_codex_mcp._reset_repetition_state()
     yield
     factorio_codex_mcp._reset_repetition_state()
@@ -48,9 +52,41 @@ def test_mcp_state_query_schema_is_typed_and_available_in_full_profile():
         "research",
         "contracts",
         "errors",
+        "alerts",
     ]
     assert schema["properties"]["limit"]["maximum"] == 128
     assert schema["properties"]["area"]["additionalProperties"] is False
+
+
+def test_mcp_render_returns_image_content_and_persists_artifact(monkeypatch, tmp_path):
+    png = b"\x89PNG\r\n\x1a\nrender-fixture"
+    monkeypatch.setenv("LEASE_ID", "lease-render")
+    monkeypatch.setenv("FACTORIO_TOOL_ARTIFACT_DIR", str(tmp_path))
+    monkeypatch.setattr(
+        factorio_codex_mcp,
+        "_envd",
+        lambda method, path, payload=None: {
+            "schema_version": "factorio-factory-render-v1",
+            "media_type": "image/png",
+            "image_base64": base64.b64encode(png).decode("ascii"),
+            "image_sha256": "fixture",
+            "image_bytes": len(png),
+            "ticks": 120,
+            "viewport": {"center_x": 0, "center_y": 0},
+        },
+    )
+
+    payload, is_error = factorio_codex_mcp._call_tool(
+        "factorio_render_factory", {"radius": 24}
+    )
+    result = factorio_codex_mcp._mcp_tool_result(payload, is_error)
+
+    assert is_error is False
+    assert [item["type"] for item in result["content"]] == ["text", "image"]
+    assert result["content"][1]["data"] == base64.b64encode(png).decode("ascii")
+    assert "image_base64" not in result["structuredContent"]
+    assert result["structuredContent"]["artifact"]["retrievable"] is True
+    assert len(list((tmp_path / "renders").glob("*.png"))) == 1
 
 
 def test_mcp_throughput_check_uses_dedicated_idempotent_endpoint(monkeypatch):
@@ -93,7 +129,9 @@ def test_mcp_execute_uses_lease_path_and_code_only_body(monkeypatch):
     )
 
     assert is_error is False
-    assert json.loads(text) == {"ok": True}
+    receipt = json.loads(text)
+    assert receipt["schema_version"] == "factorio-execution-receipt-v1"
+    assert receipt["status"] == "success"
     assert calls == [("POST", "/v1/leases/lease-123/execute", {"code": "print(1)"})]
 
 
@@ -217,12 +255,75 @@ def test_mcp_execute_bounds_large_event_stream_and_keeps_terminal_error(monkeypa
     assert is_error is False
     assert len(text) <= factorio_codex_mcp.MAX_TOOL_RESULT_CHARS
     assert shaped["event_count"] == len(events)
-    assert shaped["events_truncated"] is True
+    assert shaped["events_omitted"] > 0
     assert len(shaped["events"]) <= factorio_codex_mcp.MAX_MODEL_EVENT_ITEMS
     assert shaped["terminal_reason"] == "contract_expired"
     assert any(event["kind"] == "invalid_action" for event in shaped["events"])
     assert any(event["kind"] == "contract_expired" for event in shaped["events"])
     assert shaped["event_kind_counts"]["contract_progress"] == 998
+
+
+def test_execution_receipt_normalizes_event_derived_contract_result():
+    shaped = factorio_codex_mcp._execution_receipt(
+        {
+            "event": {"error": False, "result": "done"},
+            "research": {
+                "current_research": None,
+                "research_progress": 0.0,
+                "newly_researched": ["automation"],
+            },
+            "terminal_reason": None,
+            "events": [
+                {
+                    "kind": "contract_expired",
+                    "tick": 900,
+                    "payload": {
+                        "status": "expired",
+                        "requested": {"iron-plate": 100},
+                        "delivered": {"iron-plate": 64},
+                        "remaining": {"iron-plate": 36},
+                        "completion_ratio": 0.64,
+                    },
+                }
+            ],
+        }
+    )
+
+    assert shaped["terminal_reason"] == "contract_expired"
+    assert shaped["research"]["newly_researched"] == ["automation"]
+    assert shaped["contract_result"] == {
+        "status": "expired",
+        "terminal_reason": "contract_expired",
+        "tick": 900,
+        "requested_by_product": {"iron-plate": 100},
+        "delivered_by_product": {"iron-plate": 64},
+        "remaining_by_product": {"iron-plate": 36},
+        "completion_ratio": 0.64,
+    }
+
+
+def test_terminal_finalization_mode_allows_only_memory_tools(monkeypatch, tmp_path):
+    marker = tmp_path / "terminal-finalization.lock"
+    marker.write_text("terminal", encoding="utf-8")
+    monkeypatch.setenv("MCP_TERMINAL_FINALIZATION_FILE", str(marker))
+    monkeypatch.setenv("MEMORY_ENABLED", "1")
+    monkeypatch.setattr(
+        factorio_codex_mcp,
+        "_memory_call",
+        lambda name, arguments: {"name": name, "entries": []},
+    )
+
+    denied, denied_is_error = factorio_codex_mcp._call_tool(
+        "factorio_execute_program", {"code": "wait(1)"}
+    )
+    allowed, allowed_is_error = factorio_codex_mcp._call_tool(
+        "factorio_memory_list", {}
+    )
+
+    assert denied_is_error is True
+    assert "only factorio_memory_* tools" in denied
+    assert allowed_is_error is False
+    assert json.loads(allowed)["name"] == "factorio_memory_list"
 
 
 def test_mcp_execute_large_error_result_keeps_corrective_tail(monkeypatch):
@@ -244,9 +345,52 @@ def test_mcp_execute_large_error_result_keeps_corrective_tail(monkeypatch):
     shaped = json.loads(text)
 
     assert is_error is True
-    assert shaped["event"]["result_truncated"] is True
-    assert "prefix" in shaped["event"]["result"]
-    assert "corrective detail" in shaped["event"]["result"]
+    assert shaped["output"]["truncated"] is True
+    assert "prefix" in shaped["output"]["preview"]
+    assert "corrective detail" in shaped["output"]["preview"]
+
+
+def test_execution_receipt_archives_full_output_for_bounded_retrieval(
+    tmp_path, monkeypatch
+):
+    monkeypatch.setenv("LEASE_ID", "lease-artifact")
+    monkeypatch.setenv("FACTORIO_TOOL_ARTIFACT_DIR", str(tmp_path))
+    monkeypatch.setattr(
+        factorio_codex_mcp,
+        "_envd",
+        lambda method, path, payload=None: {
+            "event": {
+                "sequence": 9,
+                "error": False,
+                "result": "z" * 10_000,
+            },
+            "events": [],
+        },
+    )
+
+    text, _ = factorio_codex_mcp._call_tool(
+        "factorio_execute_program", {"code": "print('large')"}
+    )
+    receipt = json.loads(text)
+    first = factorio_codex_mcp._read_execution_artifact(
+        {
+            "execution_id": receipt["execution_id"],
+            "section": "output",
+            "max_chars": 1_000,
+        }
+    )
+
+    assert receipt["output"]["truncated"] is True
+    assert first["next_cursor"] is not None
+    assert first["total_chars"] > 10_000
+    assert (
+        factorio_codex_mcp._tool_route("factorio_get_recipe")["route"]
+        == "parallel_read"
+    )
+    assert (
+        factorio_codex_mcp._tool_route("factorio_execute_program")["route"]
+        == "exclusive_mutation"
+    )
 
 
 def test_small_generic_bound_preserves_terminal_and_error_summary():
@@ -255,8 +399,7 @@ def test_small_generic_bound_preserves_terminal_and_error_summary():
         "terminal_reason": "contract_expired",
         "event": {"error": True, "result": "action failed: fix the inserter"},
         "events": [
-            {"kind": "contract_progress", "tick": index}
-            for index in range(1_000)
+            {"kind": "contract_progress", "tick": index} for index in range(1_000)
         ],
         "inventory": {"iron-plate": "x" * 100_000},
     }

@@ -18,6 +18,7 @@ enabled.
 from __future__ import annotations
 
 import json
+import os
 import random
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -125,7 +126,9 @@ class CheckpointPool:
             "quality": quality_summary or {},
         }
         path = self._lineage_dir(lineage_id) / f"ep{episode}.json"
-        path.write_text(json.dumps(payload))
+        temporary = path.with_suffix(f".{os.getpid()}.tmp")
+        temporary.write_text(json.dumps(payload), encoding="utf-8")
+        os.replace(temporary, path)
         return checkpoint_id
 
     def latest(self, lineage_id: str) -> tuple[str, str] | None:
@@ -150,6 +153,33 @@ class CheckpointPool:
             return None
         payload = json.loads(path.read_text())
         return checkpoint_id, payload["state"]
+
+    def get_payload(self, checkpoint_id: str) -> dict[str, Any] | None:
+        """Return the complete versioned checkpoint envelope."""
+
+        lineage, separator, episode = checkpoint_id.rpartition(":ep")
+        if not separator or not episode.isdigit():
+            return None
+        path = self._lineage_dir(lineage) / f"ep{episode}.json"
+        if not path.exists():
+            return None
+        payload = json.loads(path.read_text())
+        return payload if isinstance(payload, dict) else None
+
+    def prune(self, lineage_id: str, *, keep: int = 2) -> int:
+        """Keep only the newest bounded checkpoint set for a lineage."""
+
+        directory = self._lineage_dir(lineage_id)
+        candidates = sorted(
+            directory.glob("ep*.json"),
+            key=lambda path: int(path.stem[2:]) if path.stem[2:].isdigit() else -1,
+            reverse=True,
+        )
+        removed = 0
+        for path in candidates[max(int(keep), 0) :]:
+            path.unlink()
+            removed += 1
+        return removed
 
     def drop(self, lineage_id: str) -> int:
         directory = self._lineage_dir(lineage_id)
@@ -203,10 +233,7 @@ class GenerationManager:
 
     def composition(self) -> dict[RolloutSource, float]:
         total = sum(self._source_counts.values()) or 1
-        return {
-            source: self._source_counts[source] / total
-            for source in SOURCE_ORDER
-        }
+        return {source: self._source_counts[source] / total for source in SOURCE_ORDER}
 
     # -- lineage registry ---------------------------------------------------
 
@@ -224,9 +251,7 @@ class GenerationManager:
 
     def active_lineages(self) -> list[LineageRecord]:
         return [
-            record
-            for record in self._lineages.values()
-            if record.status == "active"
+            record for record in self._lineages.values() if record.status == "active"
         ]
 
     # -- episode planning ---------------------------------------------------
@@ -397,9 +422,7 @@ class GenerationManager:
         if snapshot is not None:
             components.append((snapshot.objective_progress, 0.25))
             components.append((snapshot.operational_health or 0.5, 0.25))
-            components.append(
-                ((snapshot.sustained_capability or 0.5), 0.15)
-            )
+            components.append(((snapshot.sustained_capability or 0.5), 0.15))
             components.append(((snapshot.safety or 1.0), 0.10))
         components.append((min(record.fulfill_ratio, 1.0), 0.25))
 
@@ -456,9 +479,7 @@ class GenerationManager:
                 f"V_continue({continuation:.3f}) < "
                 f"V_restart({restart:.3f}) - C_reset({self.config.reset_cost})"
             )
-        elif continuation < max(
-            restart - self.config.degraded_margin, _DEGRADED_FLOOR
-        ):
+        elif continuation < max(restart - self.config.degraded_margin, _DEGRADED_FLOOR):
             outcome = "degraded_recoverable"
             continue_lineage = True
             next_source = None

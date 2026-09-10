@@ -8927,6 +8927,13 @@
         "electronics",
         "steam-power"
       ],
+      "research_trigger": {
+        "count": 1,
+        "item": {
+          "name": "lab"
+        },
+        "type": "craft-item"
+      },
       "unit_count": 1,
       "unit_energy": 0,
       "unlocked_recipes": [
@@ -9315,6 +9322,13 @@
     {
       "name": "electronics",
       "prerequisites": [],
+      "research_trigger": {
+        "count": 10,
+        "item": {
+          "name": "copper-plate"
+        },
+        "type": "craft-item"
+      },
       "unit_count": 1,
       "unit_energy": 0,
       "unlocked_recipes": [
@@ -10121,6 +10135,10 @@
       "prerequisites": [
         "oil-gathering"
       ],
+      "research_trigger": {
+        "entity": "crude-oil",
+        "type": "mine-entity"
+      },
       "unit_count": 1,
       "unit_energy": 0,
       "unlocked_recipes": [
@@ -10582,6 +10600,12 @@
       "prerequisites": [
         "rocket-silo"
       ],
+      "research_trigger": {
+        "item": {
+          "name": "satellite"
+        },
+        "type": "send-item-to-orbit"
+      },
       "unit_count": 1,
       "unit_energy": 0,
       "unlocked_recipes": []
@@ -10640,6 +10664,13 @@
     {
       "name": "steam-power",
       "prerequisites": [],
+      "research_trigger": {
+        "count": 50,
+        "item": {
+          "name": "iron-plate"
+        },
+        "type": "craft-item"
+      },
       "unit_count": 1,
       "unit_energy": 0,
       "unlocked_recipes": [
@@ -10655,6 +10686,13 @@
       "prerequisites": [
         "steel-processing"
       ],
+      "research_trigger": {
+        "count": 50,
+        "item": {
+          "name": "steel-plate"
+        },
+        "type": "craft-item"
+      },
       "unit_count": 1,
       "unit_energy": 0,
       "unlocked_recipes": []
@@ -10815,6 +10853,10 @@
       "prerequisites": [
         "uranium-mining"
       ],
+      "research_trigger": {
+        "entity": "uranium-ore",
+        "type": "mine-entity"
+      },
       "unit_count": 1,
       "unit_energy": 0,
       "unlocked_recipes": [

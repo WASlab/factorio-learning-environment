@@ -15,7 +15,7 @@ def test_worker_accepts_declared_seeds(tmp_path, monkeypatch):
         task_id="iron_plate_throughput",
         goal="test",
         seed=123,
-        checkpoint_id="scenario:default_lab_scenario",
+        checkpoint_id="scenario:open_world",
     )
     # Validation passes; the fake instance cannot actually reset.
     with pytest.raises(AttributeError):

@@ -114,21 +114,13 @@ end
 
 storage.utils.avoid_entity = function(player_index, entity, position, direction)
     local player = storage.agent_characters[player_index]
-    local player_position = player.position
-    for i=0, 10 do
-        local can_place = player.surface.can_place_entity{
-            name = entity,
-            force = "player",
-            position = position,
-            direction = storage.utils.get_entity_direction(entity, direction)
-        }
-        if can_place then
-            return true
-        end
-        player.teleport({player_position.x + i, player_position.y + i})
-    end
-    player.teleport(player_position)
-    return false
+    return player.surface.can_place_entity{
+        name = entity,
+        force = "player",
+        position = position,
+        direction = storage.utils.get_entity_direction(entity, direction),
+        build_check_type = defines.build_check_type.manual
+    }
 end
 
 storage.crafting_queue = {}

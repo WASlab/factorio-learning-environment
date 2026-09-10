@@ -37,6 +37,7 @@ class InsertItem(Tool):
 
         name, _ = entity.value
         target_name = target.name
+        self.ensure_reachable(target)
 
         # For belt groups, insert items one at a time
         if isinstance(target, BeltGroup):

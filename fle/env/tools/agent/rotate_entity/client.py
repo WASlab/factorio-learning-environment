@@ -33,6 +33,7 @@ class RotateEntity(Tool):
 
         try:
             x, y = self.get_position(entity.position)
+            self.ensure_reachable(entity)
 
             # get metaclass from pydantic model
             metaclass = entity.__class__

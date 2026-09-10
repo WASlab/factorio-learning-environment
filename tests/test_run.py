@@ -3,7 +3,7 @@ from unittest.mock import Mock, patch
 
 import pytest
 
-from fle.run import fle_cluster
+from fle.run import fle_cluster, fle_watch
 
 pytestmark = pytest.mark.no_factorio
 
@@ -13,11 +13,12 @@ def test_fle_cluster_starts_with_defaults(manager_cls):
     manager = Mock()
     manager_cls.return_value = manager
 
-    fle_cluster(Namespace(cluster_command=None, n=None, s=None))
+    fle_cluster(Namespace(cluster_command=None, n=None, s=None, map_seed=44340))
 
     manager.start.assert_called_once_with(
         num_instances=1,
-        scenario="default_lab_scenario",
+        scenario="open_world",
+        map_gen_seed=44340,
     )
 
 
@@ -26,9 +27,13 @@ def test_fle_cluster_passes_start_options(manager_cls):
     manager = Mock()
     manager_cls.return_value = manager
 
-    fle_cluster(Namespace(cluster_command="start", n=3, s="open_world"))
+    fle_cluster(
+        Namespace(cluster_command="start", n=3, s="open_world", map_seed=8675309)
+    )
 
-    manager.start.assert_called_once_with(num_instances=3, scenario="open_world")
+    manager.start.assert_called_once_with(
+        num_instances=3, scenario="open_world", map_gen_seed=8675309
+    )
 
 
 @patch("fle.cluster.run_envs.ClusterManager")
@@ -58,3 +63,16 @@ def test_fle_cluster_dispatches_logs(manager_cls):
     )
 
     manager.logs.assert_called_once_with("factorio_2")
+
+
+@patch("fle.cluster.watch.watch")
+def test_fle_watch_dispatches_options(watch):
+    fle_watch(
+        Namespace(instance=1, factorio_exe=r"C:\Factorio\factorio.exe", check=True)
+    )
+
+    watch.assert_called_once_with(
+        instance=1,
+        factorio_exe=r"C:\Factorio\factorio.exe",
+        check_only=True,
+    )

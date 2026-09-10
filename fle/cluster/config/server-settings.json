@@ -29,7 +29,7 @@
   "_comment_ignore_player_limit_for_returning_players": "Players that played on this map already can join even when the max player limit was reached.",
   "ignore_player_limit_for_returning_players": false,
   "_comment_allow_commands": "possible values are, true, false and admins-only",
-  "allow_commands": "true",
+  "allow_commands": "admins-only",
   "_comment_autosave_interval": "Autosave interval in minutes",
   "autosave_interval": 10,
   "_comment_autosave_slots": "server autosave slots, it is cycled through when the server autosaves.",

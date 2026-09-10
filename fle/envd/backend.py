@@ -1,18 +1,24 @@
 from __future__ import annotations
 
+import base64
 import hashlib
 import json
 import math
 import secrets
+import time
 from abc import ABC, abstractmethod
 from dataclasses import dataclass
 from datetime import datetime, timezone
+from enum import Enum
 from typing import Any
 
 from fle.commons.constants import REWARD_OVERRIDE_KEY
+from fle.commons.models.achievements import ProductionFlows
 from fle.commons.models.game_state import GameState
 from fle.commons.models.research_state import ResearchState, research_state_identity
 from fle.env import FactorioInstance
+from fle.env.entities import Position
+from fle.env.utils.achievements import calculate_achievements
 from fle.envd.blueprints import BlueprintStore
 from fle.envd.contract_features import (
     NamespaceRecipeDataSource,
@@ -41,8 +47,8 @@ from fle.envd.models import (
     ContractSessionState,
     ContractSessionSummary,
     CustomerDepotView,
-    DepotDeliveryTelemetry,
     DeliveryReceipt,
+    DepotDeliveryTelemetry,
     ExecutionResult,
     FactorioTaskSpec,
     Observation,
@@ -50,14 +56,12 @@ from fle.envd.models import (
     PrivilegedTransitionPacket,
     RewardVector,
     StateQualitySnapshot,
-    ThroughputCheckResult,
     ThroughputAuditResult,
+    ThroughputCheckResult,
     VerificationSnapshot,
     VerifierEvent,
     canonical_hash,
 )
-from fle.env.utils.achievements import calculate_achievements
-from fle.commons.models.achievements import ProductionFlows
 from fle.envd.objective_engine import (
     TelemetryFrame,
     _numeric_dict,
@@ -69,7 +73,41 @@ from fle.envd.objective_engine import (
     verify_native,
 )
 from fle.envd.perturbations import PerturbationEngine
+from fle.envd.status_journal import StatusJournal
+from fle.envd.camera import CameraSettings, compact_terrain, render_coarse_map
 from fle.eval.tasks import TaskFactory
+
+
+def _autonomous_throughput_score(
+    audit: ThroughputAuditResult | None,
+    attempts: list[ThroughputAuditResult],
+    authoritative: ThroughputCheckResult | None,
+) -> tuple[float, bool]:
+    """Return the only positive score allowed for adaptive throughput tasks."""
+
+    _ = attempts, authoritative
+    qualified = bool(audit is not None and audit.passed)
+    if qualified:
+        return 1.0, True
+    # Failed attempts and direct checks remain in outcome telemetry for
+    # diagnosis and curriculum design. They are deliberately not reward.
+    return 0.0, False
+
+
+def _intervention_reward_delta(
+    task: FactorioTaskSpec | None,
+    *,
+    production_before: float,
+    production_after: float,
+    automated_before: float,
+    automated_after: float,
+) -> float:
+    """Use automation-only shaping inside adaptive throughput sessions."""
+
+    if task is not None and task.adaptive_contract_session:
+        return automated_after - automated_before
+    return production_after - production_before
+
 
 # Objective kinds whose evaluation matches against full per-entity details.
 # When a task uses none of them, per-intervention telemetry can take the
@@ -112,6 +150,23 @@ class ThroughputAuditCandidate:
 def _jsonable(value: Any) -> Any:
     if value is None or isinstance(value, (str, int, float, bool)):
         return value
+    if isinstance(value, Enum):
+        enum_value = value.value
+        # Prototype members store ``(canonical_id, entity_class)``. The
+        # canonical ID is the useful public value; the class is an internal
+        # implementation detail.
+        if (
+            isinstance(enum_value, tuple)
+            and enum_value
+            and isinstance(enum_value[0], str)
+        ):
+            return enum_value[0]
+        return _jsonable(enum_value)
+    # Entity ``prototype`` fields can contain a Pydantic model class. Classes
+    # inherit ``model_dump`` from BaseModel, but it is an instance method; do
+    # not mistake the class itself for a serializable model instance.
+    if isinstance(value, type):
+        return f"{value.__module__}.{value.__qualname__}"
     if isinstance(value, dict):
         return {str(key): _jsonable(item) for key, item in value.items()}
     if isinstance(value, (list, tuple, set)):
@@ -199,9 +254,7 @@ def _instance_state_hash(
         state_for_capture = _empty_research_state()
     if state_for_capture is None and research_identity is not None:
         state_for_capture = _empty_research_state()
-    captured_state = GameState.from_instance(
-        instance, research_state=state_for_capture
-    )
+    captured_state = GameState.from_instance(instance, research_state=state_for_capture)
     raw = json.loads(captured_state.to_raw())
     raw.pop("timestamp", None)
     raw["research"] = research_state_identity(
@@ -269,6 +322,19 @@ class FactorioWorker(ABC):
 
         raise NotImplementedError
 
+    def render_factory(
+        self,
+        lease_id: str,
+        *,
+        center_x: float | None = None,
+        center_y: float | None = None,
+        radius: int = 32,
+        include_status: bool = True,
+    ) -> dict[str, Any]:
+        """Return a grounded PNG rendering of the current factory state."""
+
+        raise NotImplementedError
+
     def check_contract_throughput(
         self, lease_id: str, *, authoritative: bool = False
     ) -> ThroughputCheckResult:
@@ -292,6 +358,12 @@ class FactorioWorker(ABC):
     def set_throughput_audit_enabled(self, enabled: bool) -> None:
         return None
 
+    def export_game_state(self) -> str | None:
+        raise NotImplementedError
+
+    def export_resume_state(self) -> dict[str, Any]:
+        raise NotImplementedError
+
     @abstractmethod
     def finalize(
         self, lease_id: str, task: FactorioTaskSpec, events: list[ActionEvent]
@@ -309,6 +381,9 @@ class FLEWorker(FactorioWorker):
     def __init__(self, worker_id: str, instance: FactorioInstance):
         self.worker_id = worker_id
         self.instance = instance
+        self._execution_game_speed = float(
+            getattr(instance, "get_speed", lambda: 10.0)()
+        )
         self.task = None
         self.task_spec: FactorioTaskSpec | None = None
         self.initial_telemetry: TelemetryFrame | None = None
@@ -368,6 +443,7 @@ class FLEWorker(FactorioWorker):
         # so research and the world hash cannot change while a lease idles;
         # both are invalidated whenever execution may mutate the world.
         self._research_cache = None
+        self._last_execution_researched: set[str] = set()
         self._state_hash_cache: str | None = None
         self._state_hash_dirty = True
         self._adaptive_depot_placed = False
@@ -377,6 +453,9 @@ class FLEWorker(FactorioWorker):
         # delta construction.
         self._observation_revision = 0
         self._observation_history: list[dict[str, Any]] = []
+        self._status_journal = StatusJournal()
+        self._status_engine_sequence = -1
+        self._camera_settings = CameraSettings()
         self._latest_model_state: dict[str, Any] | None = None
         # Append-only compact transitions back historical public queries.  It
         # intentionally stores deltas, not a second copy of every snapshot.
@@ -407,41 +486,62 @@ class FLEWorker(FactorioWorker):
         worker_id: str,
         tcp_port: int,
         address: str = "localhost",
+        execution_game_speed: float = 10,
     ) -> "FLEWorker":
+        from factorio_rcon import RCONClient
+
+        probe = RCONClient(address, tcp_port, "factorio", timeout=5)
+        try:
+            bundled = probe.send_command(
+                "/sc rcon.print(remote.interfaces.fle_runtime and 'ready' or 'missing')"
+            )
+        finally:
+            probe.close()
+        if bundled != "ready":
+            raise RuntimeError(
+                "envd requires the bundled FLE runtime. Regenerate the runtime mod "
+                "and restart Factorio; refusing to load tools into an unversioned world."
+            )
         instance = FactorioInstance(
             address=address,
             tcp_port=tcp_port,
-            fast=True,
+            fast=False,
             cache_scripts=True,
             inventory={},
             all_technologies_researched=False,
             clear_entities=False,
+            reset_speed=execution_game_speed,
         )
         return cls(worker_id, instance)
 
-    _SCENARIO_CHECKPOINT = "scenario:default_lab_scenario"
+    _SCENARIO_CHECKPOINT = "scenario:open_world"
 
     def start_task(self, task: FactorioTaskSpec) -> str:
         supported = {
-            "scenario": "default_lab_scenario",
-            "factorio_version": "2.0.73",
-            "action_profile": "fle-program-v1",
+            "scenario": "open_world",
+            "factorio_version": "2.0.77",
         }
         requested = {
             "scenario": task.scenario,
             "factorio_version": task.factorio_version,
-            "action_profile": task.action_profile,
         }
         unsupported = {
             key: {"requested": requested[key], "supported": expected}
             for key, expected in supported.items()
             if requested[key] != expected
+            and not (key == "scenario" and requested[key] == "freeplay")
         }
+        if task.action_profile not in {"semantic-motor-v1", "planner-assisted-v1"}:
+            unsupported["action_profile"] = {
+                "requested": task.action_profile,
+                "supported": "semantic-motor-v1 or planner-assisted-v1",
+            }
         # Seeds are honored where infrastructure allows: map generation is a
         # container-launch concern, so workers accept any declared value.
         restore_raw: str | None = None
+        restore_worker_state: dict[str, Any] | None = None
         checkpoint_id = task.checkpoint_id or self._SCENARIO_CHECKPOINT
-        if checkpoint_id != self._SCENARIO_CHECKPOINT:
+        if checkpoint_id not in {self._SCENARIO_CHECKPOINT, "scenario:freeplay"}:
             if not checkpoint_id.startswith("lifecycle:"):
                 unsupported["checkpoint_id"] = {
                     "requested": checkpoint_id,
@@ -452,13 +552,18 @@ class FLEWorker(FactorioWorker):
             else:
                 from fle.envd.lifecycle import CheckpointPool
 
-                restored = CheckpointPool().get(checkpoint_id)
-                if restored is None:
+                checkpoint_payload = CheckpointPool().get_payload(checkpoint_id)
+                if checkpoint_payload is None:
                     raise ValueError(
                         f"Checkpoint {checkpoint_id!r} not found in "
                         "FLE_LIFECYCLE_DIR pool"
                     )
-                restore_raw = restored[1]
+                restore_raw = str(checkpoint_payload["state"])
+                quality = checkpoint_payload.get("quality")
+                if isinstance(quality, dict) and isinstance(
+                    quality.get("worker_state"), dict
+                ):
+                    restore_worker_state = quality["worker_state"]
         if unsupported:
             raise ValueError(
                 "The first envd backend only supports the pinned default world: "
@@ -505,6 +610,8 @@ class FLEWorker(FactorioWorker):
                 all_technologies_researched=all_research,
             )
         fle_task.setup_instance(self.instance)
+        if restore_raw is None and task.scenario == "freeplay":
+            self.instance.first_namespace._initialize_freeplay()
         self.instance.rcon_client.send_command(
             "/sc game.forces.player.character_inventory_slots_bonus = "
             f"{provisioning.character_inventory_slots_bonus}"
@@ -547,6 +654,7 @@ class FLEWorker(FactorioWorker):
         self._delivery_observed_tick = 0
         self._contract_delivery_baseline = {}
         self._observed_unlocked = set()
+        self._last_execution_researched = set()
         self._last_capture_watermark = None
         self._authoritative_throughput_check = None
         self._throughput_audit_result = None
@@ -566,7 +674,7 @@ class FLEWorker(FactorioWorker):
             # state hash and telemetry include the damage.
             self._fire_due_shocks(0)
         self._attach_blueprint_store(task)
-        self.instance.set_speed(10)
+        self.instance.set_speed(getattr(self, "_execution_game_speed", 10.0))
         self.instance.pause()
         self.task = fle_task
         self.task_spec = task
@@ -575,6 +683,9 @@ class FLEWorker(FactorioWorker):
         self._state_hash_dirty = True
         self._observation_revision = 0
         self._observation_history = []
+        self._status_journal = StatusJournal()
+        self._status_engine_sequence = -1
+        self._camera_settings = CameraSettings()
         self._latest_model_state = None
         self._public_state_history = []
         self._observation_nonce = secrets.token_hex(8)
@@ -585,6 +696,18 @@ class FLEWorker(FactorioWorker):
             objective.target for objective in task.objectives if objective.target
         ]
         self.initial_telemetry = self._capture_frame(targets)
+        self._evaluation_progress = None
+        if task.evaluation_mode:
+            from fle.envd.evaluation_modes import progression_progress
+
+            self._evaluation_progress = progression_progress(
+                task, self.initial_telemetry, self.initial_telemetry
+            )
+        self._last_execution_researched = {
+            str(name)
+            for name, complete in self.initial_telemetry.researched.items()
+            if complete
+        }
         initial_state_hash = self._current_state_hash()
         self.current_quality = build_state_quality_snapshot(
             task,
@@ -594,6 +717,22 @@ class FLEWorker(FactorioWorker):
         )
         self.privileged_transitions = []
         self._action_events = []
+        if restore_worker_state is not None:
+            self.import_resume_state(restore_worker_state)
+            if task.evaluation_mode and restore_worker_state.get("evaluation_progress"):
+                prior = restore_worker_state["evaluation_progress"]
+                current = self._capture_frame(targets)
+                self.initial_telemetry.tick = current.tick - int(
+                    prior["simulation_ticks"]
+                )
+                self.initial_telemetry.rocket_launches = current.rocket_launches - int(
+                    prior["rocket_launches"]
+                )
+                if prior.get("terminal_reason") == "character_died":
+                    self.initial_telemetry.death_count = current.death_count - 1
+                self._evaluation_progress = progression_progress(
+                    task, self.initial_telemetry, current
+                )
         return initial_state_hash
 
     def _scores(self) -> tuple[float, float]:
@@ -659,9 +798,11 @@ class FLEWorker(FactorioWorker):
             self._research_cache = namespace._save_research_state()
         if not self._needs_entity_details():
             return self._light_telemetry(namespace, targets)
-        return capture_telemetry(
+        frame = capture_telemetry(
             self.instance, targets, research_state=self._research_cache
         )
+        frame.tick = self._episode_tick()
+        return frame
 
     @staticmethod
     def _target_recipes(namespace: Any, targets: list[str]) -> dict[str, Any]:
@@ -724,7 +865,7 @@ class FLEWorker(FactorioWorker):
                 pass
 
         return TelemetryFrame(
-            tick=int(self.instance.get_elapsed_ticks()),
+            tick=self._episode_tick(),
             inventory=_numeric_dict(namespace.inspect_inventory()),
             flows=flows,
             production_score=float(production_score or 0),
@@ -777,7 +918,9 @@ class FLEWorker(FactorioWorker):
             return [value[key] for key in sorted(value, key=sort_key)]
         return list(value or [])
 
-    def _cache_customer_depots(self, telemetry: dict[str, Any]) -> None:
+    def _cache_customer_depots(self, telemetry: Any) -> None:
+        if not isinstance(telemetry, dict):
+            return
         raw_depots = self._lua_array(telemetry.get("depots"))
         depots: list[CustomerDepotView] = []
         for index, raw in enumerate(raw_depots, start=1):
@@ -801,13 +944,37 @@ class FLEWorker(FactorioWorker):
                 if parsed_unit is not None
                 else f"customer-depot-{index}"
             )
+            entity_names = raw.get("entity_names") or {}
+            entity_name = raw.get("entity_name") or "steel-chest"
+            if isinstance(entity_names, dict) and entity_names:
+                entity_name = next(iter(entity_names))
+            surfaces = raw.get("surfaces") or {}
+            surface = raw.get("surface")
+            if isinstance(surfaces, dict) and surfaces:
+                surface = next(iter(surfaces))
+            products = raw.get("products") or {}
+            product = raw.get("product")
+            if isinstance(products, dict) and products:
+                product = next(iter(products))
             depots.append(
                 CustomerDepotView(
                     depot_id=depot_id,
                     unit_number=parsed_unit,
-                    entity_name="steel-chest",
+                    entity_name=str(entity_name),
                     position={"x": x, "y": y},
-                    surface=(str(raw["surface"]) if raw.get("surface") else None),
+                    surface=(str(surface) if surface else None),
+                    customer_owned=bool(raw.get("customer_owned", True)),
+                    product=(str(product) if product else None),
+                    acceptance_limit=(
+                        float(raw["acceptance_limit"])
+                        if raw.get("acceptance_limit") is not None
+                        else None
+                    ),
+                    accepted=(
+                        float(raw["accepted"])
+                        if raw.get("accepted") is not None
+                        else None
+                    ),
                 )
             )
         if "depots" in telemetry:
@@ -843,6 +1010,36 @@ class FLEWorker(FactorioWorker):
             if items:
                 samples.append((sample_tick, items))
         return current_tick, sorted(samples, key=lambda sample: sample[0])
+
+    def _delivery_on_episode_clock(self, telemetry: dict[str, Any]) -> dict[str, Any]:
+        """Translate Lua depot time to the worker's persistent episode clock.
+
+        Depot adoption resets its Lua clock, while checkpoint restoration keeps
+        the worker's original epoch. Without this translation, valid post-resume
+        arrivals can appear to predate the active order and are discarded.
+        Cumulative quantities are unaffected; both automated and manual buckets
+        share the same translation.
+        """
+        depot_epoch = telemetry.get("epoch_tick")
+        worker_epoch = getattr(self, "_epoch_game_tick", None)
+        if depot_epoch is None or worker_epoch is None:
+            return telemetry
+        offset = int(depot_epoch) - int(worker_epoch)
+        if not offset:
+            return telemetry
+        buckets = telemetry.get("buckets") or []
+        if isinstance(buckets, dict):
+            buckets = buckets.values()
+        return {
+            **telemetry,
+            "epoch_tick": int(worker_epoch),
+            "tick": int(telemetry.get("tick") or 0) + offset,
+            "buckets": [
+                {**bucket, "start_tick": int(bucket.get("start_tick") or 0) + offset}
+                for bucket in buckets
+                if isinstance(bucket, dict)
+            ],
+        }
 
     def _record_delivery_samples(
         self,
@@ -943,9 +1140,7 @@ class FLEWorker(FactorioWorker):
 
         recent = [
             {
-                "start_tick": max(
-                    tick - DELIVERY_BUCKET_TICKS + 1, 0
-                ),
+                "start_tick": max(tick - DELIVERY_BUCKET_TICKS + 1, 0),
                 "end_tick": tick,
                 "items": {
                     item: round(float(amount), 6) for item, amount in items.items()
@@ -984,13 +1179,34 @@ class FLEWorker(FactorioWorker):
                     "start_tick": max(tick - DELIVERY_BUCKET_TICKS + 1, 0),
                     "end_tick": tick,
                     "items": {
-                        item: round(float(amount), 6)
-                        for item, amount in items.items()
+                        item: round(float(amount), 6) for item, amount in items.items()
                     },
                 }
                 for tick, items in manual_history[-max(0, recent_limit) :]
             ],
         )
+
+    def _recent_delivery_rates(self, window_seconds: int) -> dict[str, float]:
+        """Return inserter-fed depot rates over an exact recent window."""
+
+        history = list(getattr(self, "_delivery_history", []))
+        observed = max(
+            getattr(self, "_delivery_observed_tick", 0),
+            max((tick for tick, _ in history), default=0),
+        )
+        window_ticks = max(int(window_seconds), 1) * 60
+        cutoff = observed - window_ticks
+        totals: dict[str, float] = {}
+        for tick, items in history:
+            if cutoff < tick <= observed:
+                for item, amount in items.items():
+                    totals[item] = totals.get(item, 0.0) + float(amount)
+        minutes = window_ticks / 3600.0
+        return {
+            item: round(amount / minutes, 6)
+            for item, amount in totals.items()
+            if amount > 0
+        }
 
     def _delivery_totals(self) -> dict[str, float]:
         totals: dict[str, float] = {}
@@ -1012,7 +1228,7 @@ class FLEWorker(FactorioWorker):
             for item, amount in delivered_after.items()
             if amount - delivered_before.get(item, 0.0) > 1e-9
         }
-        if not attempted_insert and not credited:
+        if not attempted_insert and not credited and not contracts:
             return None
         remaining: dict[str, float] = {}
         for contract in contracts:
@@ -1022,51 +1238,102 @@ class FLEWorker(FactorioWorker):
             (contract for contract in contracts if contract.status == "open"),
             contracts[-1] if contracts else None,
         )
+        sustained = bool(open_contract and open_contract.kind == "sustained")
+        audit = getattr(self, "_throughput_audit_result", None)
+        throughput_certified = bool(audit is not None and audit.passed)
+        qualification_pending = bool(
+            sustained
+            and open_contract is not None
+            and open_contract.status == "open"
+            and not throughput_certified
+        )
         if credited:
-            message = (
-                "Automated customer delivery credited. Depot inventories are "
-                "drained immediately, so an empty depot is expected."
-            )
+            if sustained:
+                message = (
+                    "Inserter-fed depot delivery observed. This confirms depot "
+                    "transport only, not automated production. The sustained "
+                    "contract remains open until unattended production and depot "
+                    "throughput pass the autonomous audit; a zero physical "
+                    "delivery balance is not certification."
+                )
+            else:
+                message = (
+                    "Inserter-fed customer delivery credited. Contract demand is "
+                    "consumed; production above the acceptance limit remains in "
+                    "the bound chest."
+                )
         elif contracts:
             message = (
-                "No customer delivery was credited by this intervention. "
-                "Customer contracts credit only automated inserter-fed traffic "
-                "into customer_depot_ids; direct agent insertion is audit-only."
+                "No inserter-fed customer delivery was observed for this "
+                "intervention. This is an interval measurement, not an audit "
+                "failure. Direct insertion into the depot is audit-only; "
+                "fueling a machine is not itself a rejected depot delivery."
             )
+            if sustained:
+                message += (
+                    " Sustained success requires unattended production and depot "
+                    "throughput to pass the autonomous audit."
+                )
+            if not self._customer_depots_cache:
+                message += " No delivery chest is bound. Bind an empty chest for the active product."
+            else:
+                message += (
+                    " If traffic remains zero, inspect the depot feeder's pickup/drop "
+                    "positions and status, then its source's fuel, ingredients, and output."
+                )
         else:
             message = "No customer contract is currently active."
         return DeliveryReceipt(
             credited=credited,
             remaining={item: round(amount, 4) for item, amount in remaining.items()},
             contract_status=open_contract.status if open_contract else None,
+            delivery_mode="inserter_fed" if credited else "none",
+            throughput_certified=throughput_certified,
+            qualification_pending=qualification_pending,
             customer_depot_ids=[
                 depot.depot_id for depot in self._customer_depots_cache
             ],
+            observed_depot_totals={
+                item: round(
+                    max(
+                        float(amount)
+                        - float(
+                            getattr(self, "_contract_delivery_baseline", {}).get(
+                                item, 0.0
+                            )
+                        ),
+                        0.0,
+                    ),
+                    6,
+                )
+                for item, amount in getattr(self, "_delivery_raw_totals", {}).items()
+            },
             message=message,
         )
 
     def _setup_customer(self, task: FactorioTaskSpec) -> ContractEngine | None:
-        """Place immutable sink depots and arm the hidden demand schedule."""
+        """Configure customer delivery mechanics and arm any hidden schedule."""
 
         spec = task.customer
         if spec is None:
             try:
-                # Adaptive open-play sessions have no hidden schedule, but
-                # still need a real customer-owned sink for each committed
-                # order.  Place the depots once at lease start so the agent can
-                # discover and use them across all epochs.
+                # Adaptive sessions let the agent designate an existing empty
+                # player chest for each active product. No fixed map location
+                # constrains factory layout.
                 if task.adaptive_contract_session:
-                    placement = self.instance.first_namespace._customer_depot(
-                        "place", self._DEPOT_OFFSET[0], self._DEPOT_OFFSET[1], 8, True
+                    configured = self.instance.first_namespace._customer_depot(
+                        "designated"
                     )
-                    if not isinstance(placement, dict) or not placement.get("placed"):
+                    if (
+                        not isinstance(configured, dict)
+                        or configured.get("mode") != "designated"
+                    ):
                         raise RuntimeError(
-                            "Could not place adaptive customer sink depots"
+                            "Could not enable agent-designated delivery chests"
                         )
-                    self._adaptive_depot_placed = True
+                    self._adaptive_depot_placed = False
                     depot_telemetry = (
-                        self.instance.first_namespace._customer_depot("telemetry")
-                        or {}
+                        self.instance.first_namespace._customer_depot("telemetry") or {}
                     )
                     self._cache_customer_depots(depot_telemetry)
                 else:
@@ -1106,6 +1373,7 @@ class FLEWorker(FactorioWorker):
         except Exception:
             telemetry = {}
         self._cache_customer_depots(telemetry)
+        telemetry = self._delivery_on_episode_clock(telemetry)
         current_tick, raw_bucket_list = self._parse_delivery_buckets(telemetry)
         self._record_delivery_samples(telemetry, raw_bucket_list)
         _, manual_bucket_list = self._parse_delivery_buckets(
@@ -1114,9 +1382,7 @@ class FLEWorker(FactorioWorker):
         self._record_manual_delivery_samples(telemetry, manual_bucket_list)
         buckets = [
             DeliveryBucket(
-                start_tick=max(
-                    sample_tick - (sample_tick % DELIVERY_BUCKET_TICKS), 0
-                ),
+                start_tick=max(sample_tick - (sample_tick % DELIVERY_BUCKET_TICKS), 0),
                 items=items,
             )
             for sample_tick, items in raw_bucket_list
@@ -1310,6 +1576,32 @@ class FLEWorker(FactorioWorker):
         # independent of the hidden rating/audit ledgers.
         self._contract_production_baseline = self._production_counters()
         self._contract_delivery_baseline = dict(self._delivery_raw_totals)
+        configured = self.instance.first_namespace._customer_depot(
+            "configure",
+            [
+                {
+                    "name": line.product,
+                    "limit": float(line.quantity),
+                    # One yellow belt carries 15 items/s. Additional delivery
+                    # depots become available only when the requested line
+                    # exceeds that conservative single-sink capacity.
+                    "max_depots": max(
+                        1,
+                        math.ceil(
+                            (float(line.quantity) * 3600.0 / spec.deadline_ticks)
+                            / 900.0
+                        ),
+                    ),
+                }
+                for line in order.products
+            ],
+            0,
+            0,
+            False,
+        )
+        if not isinstance(configured, dict) or configured.get("mode") != "designated":
+            raise RuntimeError("Could not configure designated delivery products")
+        self._customer_depots_cache = []
         self._observation_keyframe_pending = True
         self._authoritative_throughput_check = None
         self._throughput_audit_result = None
@@ -1391,7 +1683,8 @@ class FLEWorker(FactorioWorker):
             round(outcome_state.delivered_quantity),
             outcome_state.requested_quantity,
         )
-        ratio = outcome_state.completion_ratio
+        physical_completion_ratio = outcome_state.completion_ratio
+        ratio = physical_completion_ratio
 
         status_map = {
             "fulfilled": "fulfilled",
@@ -1402,6 +1695,15 @@ class FLEWorker(FactorioWorker):
         # Section 5: an infrastructure interruption is never recorded as an
         # order loss; delivery accounting stays in the retained record.
         status = status_map[outcome_state.status]
+        if order.order_kind == "sustained":
+            ratio, qualified = _autonomous_throughput_score(
+                self._throughput_audit_result,
+                self._throughput_audit_attempts,
+                self._authoritative_throughput_check,
+            )
+            status = (
+                "fulfilled" if qualified else ("partial" if ratio > 0.0 else "expired")
+            )
         if infrastructure_interrupt:
             status = "infrastructure_error"
         interventions_used = len(self._action_events) - self._epoch_interventions_base
@@ -1440,10 +1742,10 @@ class FLEWorker(FactorioWorker):
             factory_band=self._active_factory_band,
             target_band=self._active_target_band,
             delivery_telemetry={
-                "physical": self._delivery_telemetry_snapshot().model_dump(
-                    mode="json"
-                ),
+                "physical": self._delivery_telemetry_snapshot().model_dump(mode="json"),
                 "order": outcome_state.delivery_telemetry,
+                "physical_completion_ratio": round(physical_completion_ratio, 6),
+                "benchmark_score_basis": "autonomous_throughput_audit",
             },
             autonomous_throughput=self._authoritative_throughput_check,
             throughput_audit=self._throughput_audit_result,
@@ -1451,6 +1753,12 @@ class FLEWorker(FactorioWorker):
         )
         self._epoch_records.append(record)
         self._completed_epochs += 1
+        # Return agent-selected chests to ordinary factory ownership. Any
+        # production beyond the contract allowance remains in the chest.
+        try:
+            self.instance.first_namespace._customer_depot("configure", [], 0, 0, False)
+        finally:
+            self._customer_depots_cache = []
         # Active customer state cleared after finalization (section 14).
         self._active_order = None
         self._active_epoch_index = None
@@ -1473,13 +1781,14 @@ class FLEWorker(FactorioWorker):
 
     def _drain_delivery_buckets(self) -> list[tuple[int, dict[str, float]]]:
         """Pull sink telemetry as chronological (tick, items) samples."""
-        engine_telemetry: dict = {}
+        engine_telemetry: dict[str, Any] = {}
         try:
-            engine_telemetry = (
-                self.instance.first_namespace._customer_depot("telemetry") or {}
-            )
+            raw_telemetry = self.instance.first_namespace._customer_depot("telemetry")
         except Exception:
             return []
+        if not isinstance(raw_telemetry, dict):
+            return []
+        engine_telemetry = self._delivery_on_episode_clock(raw_telemetry)
         self._cache_customer_depots(engine_telemetry)
         _current_tick, samples = self._parse_delivery_buckets(engine_telemetry)
         self._record_delivery_samples(engine_telemetry, samples)
@@ -1638,6 +1947,220 @@ class FLEWorker(FactorioWorker):
         except Exception:
             return None
 
+    def export_resume_state(self) -> dict[str, Any]:
+        """Serialize public/runtime state not contained in Factorio GameState."""
+
+        return _jsonable(
+            {
+                "schema_version": "fle-worker-resume-v1",
+                "evaluation_progress": getattr(self, "_evaluation_progress", None),
+                "epoch_game_tick": self._epoch_game_tick,
+                "customer_events": self._customer_events,
+                "contract_session_id": self.contract_session_id,
+                "contract_baseline_tick": self._contract_baseline_tick,
+                "active_order": (
+                    self._active_order.export_state()
+                    if self._active_order is not None
+                    else None
+                ),
+                "active_epoch_index": self._active_epoch_index,
+                "active_commitment_hash": self._active_commitment_hash,
+                "active_epoch_spec": self._active_epoch_spec,
+                "active_factory_band": self._active_factory_band,
+                "active_target_band": self._active_target_band,
+                "epoch_start_tick": self._epoch_start_tick,
+                "epoch_interventions_base": self._epoch_interventions_base,
+                "completed_epochs": self._completed_epochs,
+                "epoch_records": self._epoch_records,
+                "flow_history": self._flow_history,
+                "production_history": self._production_history,
+                "contract_production_baseline": self._contract_production_baseline,
+                "delivery_history": self._delivery_history,
+                "delivery_raw_totals": self._delivery_raw_totals,
+                "manual_delivery_history": self._manual_delivery_history,
+                "manual_delivery_totals": self._manual_delivery_totals,
+                "delivery_observed_tick": self._delivery_observed_tick,
+                "contract_delivery_baseline": self._contract_delivery_baseline,
+                "observed_unlocked": sorted(self._observed_unlocked),
+                "last_execution_researched": sorted(self._last_execution_researched),
+                "last_capture_watermark": self._last_capture_watermark,
+                "authoritative_throughput_check": self._authoritative_throughput_check,
+                "throughput_audit_result": self._throughput_audit_result,
+                "throughput_audit_attempts": self._throughput_audit_attempts,
+                "throughput_audit_retry_after_tick": self._throughput_audit_retry_after_tick,
+                "customer_depots": self._customer_depots_cache,
+                "observation_revision": self._observation_revision,
+                "observation_history": self._observation_history,
+                "status_journal": self._status_journal.export(),
+                "camera_settings": getattr(
+                    self, "_camera_settings", CameraSettings()
+                ).model_dump(),
+                "latest_model_state": self._latest_model_state,
+                "public_state_history": self._public_state_history,
+                "observation_nonce": self._observation_nonce,
+                "observation_keyframe_revision": self._observation_keyframe_revision,
+                "observation_keyframe_id": self._observation_keyframe_id,
+                "observation_keyframe_pending": self._observation_keyframe_pending,
+                "action_events": self._action_events,
+            }
+        )
+
+    def import_resume_state(self, state: dict[str, Any]) -> None:
+        self._camera_settings = CameraSettings.model_validate(
+            state.get("camera_settings") or {}
+        )
+        if state.get("schema_version") != "fle-worker-resume-v1":
+            raise ValueError("unsupported FLE worker resume state")
+        self._epoch_game_tick = int(state.get("epoch_game_tick", self._epoch_game_tick))
+        self._customer_events = list(state.get("customer_events") or [])
+        self.contract_session_id = state.get("contract_session_id")
+        self._contract_baseline_tick = state.get("contract_baseline_tick")
+        active_order = state.get("active_order")
+        self._active_order = (
+            ActiveOrder.from_state(active_order)
+            if isinstance(active_order, dict)
+            else None
+        )
+        self._active_epoch_index = state.get("active_epoch_index")
+        self._active_commitment_hash = state.get("active_commitment_hash")
+        active_spec = state.get("active_epoch_spec")
+        self._active_epoch_spec = (
+            ContractEpochSpec.model_validate(active_spec)
+            if isinstance(active_spec, dict)
+            else None
+        )
+        self._active_factory_band = state.get("active_factory_band")
+        self._active_target_band = state.get("active_target_band")
+        self._epoch_start_tick = state.get("epoch_start_tick")
+        self._epoch_interventions_base = int(state.get("epoch_interventions_base", 0))
+        self._completed_epochs = int(state.get("completed_epochs", 0))
+        self._epoch_records = [
+            ContractEpochOutcome.model_validate(value)
+            for value in state.get("epoch_records", [])
+        ]
+        self._flow_history = [
+            (int(tick), {str(key): float(value) for key, value in outputs.items()})
+            for tick, outputs in state.get("flow_history", [])
+        ]
+        self._production_history = list(state.get("production_history") or [])
+        self._contract_production_baseline = dict(
+            state.get("contract_production_baseline") or {"input": {}, "output": {}}
+        )
+        self._delivery_history = [
+            (int(tick), {str(key): float(value) for key, value in outputs.items()})
+            for tick, outputs in state.get("delivery_history", [])
+        ]
+        self._delivery_raw_totals = dict(state.get("delivery_raw_totals") or {})
+        self._manual_delivery_history = [
+            (int(tick), {str(key): float(value) for key, value in outputs.items()})
+            for tick, outputs in state.get("manual_delivery_history", [])
+        ]
+        self._manual_delivery_totals = dict(state.get("manual_delivery_totals") or {})
+        self._delivery_observed_tick = int(state.get("delivery_observed_tick", 0))
+        self._contract_delivery_baseline = dict(
+            state.get("contract_delivery_baseline") or {}
+        )
+        self._observed_unlocked = set(state.get("observed_unlocked") or [])
+        self._last_execution_researched = set(
+            state.get("last_execution_researched") or []
+        )
+        watermark = state.get("last_capture_watermark")
+        self._last_capture_watermark = tuple(watermark) if watermark else None
+        throughput = state.get("authoritative_throughput_check")
+        self._authoritative_throughput_check = (
+            ThroughputCheckResult.model_validate(throughput)
+            if isinstance(throughput, dict)
+            else None
+        )
+        audit = state.get("throughput_audit_result")
+        self._throughput_audit_result = (
+            ThroughputAuditResult.model_validate(audit)
+            if isinstance(audit, dict)
+            else None
+        )
+        self._throughput_audit_attempts = [
+            ThroughputAuditResult.model_validate(value)
+            for value in state.get("throughput_audit_attempts", [])
+        ]
+        self._throughput_audit_retry_after_tick = int(
+            state.get("throughput_audit_retry_after_tick", 0)
+        )
+        self._customer_depots_cache = [
+            CustomerDepotView.model_validate(value)
+            for value in state.get("customer_depots", [])
+        ]
+        if self._active_order is not None:
+            delivered_by_product = {
+                str(product): float(amount)
+                for product, amount in dict(active_order.get("delivered") or {}).items()
+            }
+            remaining_allowance = {
+                line.product: max(
+                    float(line.quantity) - delivered_by_product.get(line.product, 0.0),
+                    0.0,
+                )
+                for line in self._active_order.products
+            }
+            self.instance.first_namespace._customer_depot(
+                "configure",
+                [
+                    {
+                        "name": line.product,
+                        "limit": remaining_allowance[line.product],
+                    }
+                    for line in self._active_order.products
+                ],
+                0,
+                0,
+                False,
+            )
+            if self._customer_depots_cache:
+                self.instance.first_namespace._customer_depot(
+                    "adopt",
+                    [
+                        {
+                            "position": dict(depot.position),
+                            "surface": depot.surface,
+                            "entity_name": depot.entity_name,
+                            "product": depot.product,
+                            "limit": remaining_allowance.get(depot.product or "", 0.0),
+                        }
+                        for depot in self._customer_depots_cache
+                    ],
+                    0,
+                    0,
+                    False,
+                )
+        self._observation_revision = int(state.get("observation_revision", 0))
+        self._observation_history = list(state.get("observation_history") or [])
+        self._status_journal = (
+            StatusJournal.restore(state["status_journal"])
+            if state.get("status_journal")
+            else StatusJournal()
+        )
+        # GameState reconstructs entities; it does not restore the Lua event ring.
+        # Keep published history but establish a fresh engine keyframe on resume.
+        self._status_engine_sequence = -1
+        self._latest_model_state = state.get("latest_model_state")
+        self._public_state_history = list(state.get("public_state_history") or [])
+        self._observation_nonce = str(
+            state.get("observation_nonce") or secrets.token_hex(8)
+        )
+        self._observation_keyframe_revision = int(
+            state.get("observation_keyframe_revision", 0)
+        )
+        self._observation_keyframe_id = str(state.get("observation_keyframe_id") or "")
+        self._observation_keyframe_pending = bool(
+            state.get("observation_keyframe_pending", True)
+        )
+        self._action_events = [
+            ActionEvent.model_validate(value)
+            for value in state.get("action_events", [])
+        ]
+        self._research_cache = None
+        self._state_hash_cache = None
+        self._state_hash_dirty = True
+
     def _maybe_capture_throughput_candidate(self) -> None:
         """Run the cheap detector after a public tool and snapshot once."""
 
@@ -1669,9 +2192,18 @@ class FLEWorker(FactorioWorker):
             epoch_index = self._active_epoch_index or 1
             commitment_hash = self._active_commitment_hash or ""
             depot_specs = [
-                {"position": dict(depot.position), "surface": depot.surface}
+                {
+                    "position": dict(depot.position),
+                    "surface": depot.surface,
+                    "entity_name": depot.entity_name,
+                    "product": depot.product,
+                    # The isolated audit must observe actual flow, not a
+                    # contract-quantity cap. Its state is discarded afterward.
+                    "limit": 1_000_000_000,
+                }
                 for depot in self._customer_depots_cache
             ]
+            detector_uses_depot_service = True
         else:
             task = self.task_spec
             audit = task.throughput_audit if task is not None else None
@@ -1695,17 +2227,21 @@ class FLEWorker(FactorioWorker):
             epoch_index = 1
             commitment_hash = task.fingerprint
             depot_specs = []
+            detector_uses_depot_service = False
         previous_capture = self._capture_tool_calls
         self._capture_tool_calls = False
         try:
-            rates: dict[str, float] = {}
-            for product in targets:
-                result = self.instance.first_namespace._get_recent_rate(
-                    product, audit.detector_window_seconds
-                )
-                if not isinstance(result, dict) or result.get("error"):
-                    return
-                rates[product] = float(result.get("dynamic_per_minute", 0.0))
+            if detector_uses_depot_service:
+                rates = self._recent_delivery_rates(audit.detector_window_seconds)
+            else:
+                rates = {}
+                for product in targets:
+                    result = self.instance.first_namespace._get_recent_rate(
+                        product, audit.detector_window_seconds
+                    )
+                    if not isinstance(result, dict) or result.get("error"):
+                        return
+                    rates[product] = float(result.get("dynamic_per_minute", 0.0))
             if any(
                 rates.get(product, 0.0) < target * audit.detector_trigger_ratio
                 for product, target in targets.items()
@@ -1759,21 +2295,44 @@ class FLEWorker(FactorioWorker):
             clear_entities=True,
         )
         self.instance.pause()
-        adopted = self.instance.first_namespace._customer_depot.adopt(
-            candidate.depot_specs
+        adopted = self.instance.first_namespace._customer_depot(
+            "adopt", candidate.depot_specs, 0, 0, False
         )
 
         def advance(seconds: int) -> int:
             if seconds <= 0:
                 return 0
+            if getattr(self.instance, "rcon_client", None) is None:
+                # Lightweight workers used by deterministic tests and alternate
+                # runtimes may expose only the namespace clock.
+                self.instance.set_speed_and_unpause(audit.audit_game_speed)
+                try:
+                    self.instance.first_namespace.sleep(seconds)
+                finally:
+                    self.instance.pause()
+                return seconds * 60
             start_tick = self._read_game_tick()
+            target_tick = start_tick + seconds * 60
+            # game.speed is a target, not a guarantee. Under load the server
+            # may advance far fewer simulated ticks than wall-time arithmetic
+            # predicts, which can alias periodic production into false zero
+            # subwindows. Poll the authoritative game clock instead.
+            deadline = time.monotonic() + max(float(seconds) * 5.0, 30.0)
             self.instance.set_speed_and_unpause(audit.audit_game_speed)
             try:
-                self.instance.first_namespace.sleep(seconds)
+                current_tick = start_tick
+                while current_tick < target_tick:
+                    if time.monotonic() >= deadline:
+                        raise TimeoutError(
+                            "Throughput audit failed to advance the requested "
+                            f"{seconds * 60} simulated ticks"
+                        )
+                    time.sleep(0.02)
+                    current_tick = self._read_game_tick()
             finally:
                 self.instance.pause()
             observed_ticks = max(self._read_game_tick() - start_tick, 0)
-            return observed_ticks or seconds * 60
+            return observed_ticks
 
         def depot_totals() -> dict[str, float]:
             telemetry = self.instance.first_namespace._customer_depot("telemetry") or {}
@@ -1810,16 +2369,13 @@ class FLEWorker(FactorioWorker):
                     last_flows, current_flows, product
                 )
                 delivered = max(
-                    current_depot.get(product, 0.0)
-                    - last_depot.get(product, 0.0),
+                    current_depot.get(product, 0.0) - last_depot.get(product, 0.0),
                     0.0,
                 )
                 production_windows[product].append(
                     produced / max(elapsed_minutes, 1e-9)
                 )
-                depot_windows[product].append(
-                    delivered / max(elapsed_minutes, 1e-9)
-                )
+                depot_windows[product].append(delivered / max(elapsed_minutes, 1e-9))
             last_flows = current_flows
             last_depot = current_depot
 
@@ -1832,8 +2388,37 @@ class FLEWorker(FactorioWorker):
             for product, values in depot_windows.items()
         }
         line_scores: dict[str, float] = {}
+        supply_targets: dict[str, float] = {}
+        if audit.require_closed_loop:
+            for product, target in candidate.target_rates.items():
+                for (
+                    ingredient,
+                    units_per_product,
+                ) in self.contract_catalog.supply_chain_requirements(product).items():
+                    supply_targets[ingredient] = (
+                        supply_targets.get(ingredient, 0.0) + target * units_per_product
+                    )
+        final_flows = last_flows
+        elapsed_minutes_total = max(sum(subwindow_ticks) / 3600.0, 1e-9)
+        supply_rates = {
+            ingredient: self._audit_production_delta(
+                before_flows, final_flows, ingredient
+            )
+            / elapsed_minutes_total
+            for ingredient in supply_targets
+        }
+        supply_scores = {
+            ingredient: min(
+                supply_rates.get(ingredient, 0.0)
+                / max(target * audit.closure_min_supply_ratio, 1e-9),
+                1.0,
+            )
+            for ingredient, target in supply_targets.items()
+        }
         failures: list[str] = []
-        adopted_count = int(adopted.get("adopted", 0)) if isinstance(adopted, dict) else 0
+        adopted_count = (
+            int(adopted.get("adopted", 0)) if isinstance(adopted, dict) else 0
+        )
         for product, target in candidate.target_rates.items():
             ratios = [production_rates.get(product, 0.0) / max(target, 1e-9)]
             floor = target * audit.subwindow_floor_ratio
@@ -1848,6 +2433,9 @@ class FLEWorker(FactorioWorker):
             line_scores[product] = min(min(ratios), 1.0)
             if line_scores[product] < 1.0 - 1e-9:
                 failures.append(f"{product}:rate_or_subwindow_below_threshold")
+        for ingredient, score in supply_scores.items():
+            if score < 1.0 - 1e-9:
+                failures.append(f"{ingredient}:upstream_supply_below_threshold")
         if audit.require_depot_service and adopted_count < len(candidate.depot_specs):
             failures.append("customer_depot_clone_incomplete")
         return ThroughputAuditResult(
@@ -1869,6 +2457,9 @@ class FLEWorker(FactorioWorker):
             depot_rates_per_minute=depot_rates,
             production_subwindow_rates=production_windows,
             depot_subwindow_rates=depot_windows,
+            supply_chain_rates_per_minute=supply_rates,
+            supply_chain_targets_per_minute=supply_targets,
+            supply_chain_scores=supply_scores,
             line_scores=line_scores,
             passed=not failures,
             failure_reasons=failures,
@@ -1912,7 +2503,8 @@ class FLEWorker(FactorioWorker):
             )
 
     def execute(self, lease_id: str, code: str, sequence: int) -> ExecutionResult:
-        before, _ = self._scores()
+        action_started_tick = self._episode_tick()
+        before, automated_before = self._scores()
         delivered_before = self._delivery_totals()
         started = datetime.now(timezone.utc)
         # The world may mutate during evaluation; both caches are invalid
@@ -1923,18 +2515,17 @@ class FLEWorker(FactorioWorker):
         self._capture_tool_calls = True
         self._executing_lease_id = lease_id
         self._throughput_detector_dirty = False
-        self.instance.set_speed_and_unpause(10)
+        self.instance.set_speed_and_unpause(
+            getattr(self, "_execution_game_speed", 10.0)
+        )
         try:
             _, duration, result = self.instance.eval(code, timeout=120)
         finally:
             self._capture_tool_calls = False
             # Model generation and network latency must not advance simulation time.
             self.instance.pause()
-        try:
-            if self._throughput_detector_dirty:
-                self._maybe_capture_throughput_candidate()
-        finally:
-            self._executing_lease_id = None
+        action_ended_tick = self._episode_tick()
+        self._executing_lease_id = None
         result_text = str(result)
         error = "error" in result_text.lower() or "exception:" in result_text.lower()
         forbidden_actions = {
@@ -1969,7 +2560,9 @@ class FLEWorker(FactorioWorker):
             else 0
         )
         if transition_holdout and self.task_spec is not None:
-            self.instance.set_speed_and_unpause(10)
+            self.instance.set_speed_and_unpause(
+                getattr(self, "_execution_game_speed", 10.0)
+            )
             try:
                 current_frame, throughput_measurements, holdout_ticks = (
                     measure_autonomous_holdout(
@@ -1985,21 +2578,49 @@ class FLEWorker(FactorioWorker):
 
         after = current_frame.production_score
         automated = current_frame.automated_production_score
+        researched_now = {
+            str(name) for name, complete in current_frame.researched.items() if complete
+        }
+        newly_researched = sorted(
+            researched_now - getattr(self, "_last_execution_researched", set())
+        )
+        self._last_execution_researched = researched_now
+        research_receipt = {
+            "current_research": current_frame.current_research,
+            "research_progress": round(float(current_frame.research_progress), 6),
+            "newly_researched": newly_researched,
+        }
         state_hash = self._current_state_hash()
         character_died = bool(
             self.initial_telemetry
             and current_frame.death_count > self.initial_telemetry.death_count
         )
         terminal_reason = "character_died" if character_died else None
+        evaluation_progress = None
+        if self.task_spec and self.task_spec.evaluation_mode and self.initial_telemetry:
+            from fle.envd.evaluation_modes import progression_progress
+
+            evaluation_progress = progression_progress(
+                self.task_spec, self.initial_telemetry, current_frame
+            )
+            self._evaluation_progress = evaluation_progress
+            terminal_reason = evaluation_progress["terminal_reason"]
         event = ActionEvent(
             sequence=sequence,
             code_sha256=hashlib.sha256(code.encode()).hexdigest(),
             started_at=started,
             duration_seconds=duration,
-            reward_delta=after - before,
+            reward_delta=_intervention_reward_delta(
+                self.task_spec,
+                production_before=before,
+                production_after=after,
+                automated_before=automated_before,
+                automated_after=automated,
+            ),
             error=error,
             result=result_text,
             ticks=current_frame.tick,
+            ticks_elapsed=max(action_ended_tick - action_started_tick, 0),
             executed_tools=executed_tools,
             policy_violations=policy_violations,
         )
@@ -2053,6 +2674,17 @@ class FLEWorker(FactorioWorker):
         emitted_events.extend(self._sync_customer())
         emitted_events.extend(self._sync_active_order())
         emitted_events.extend(self._sync_perturbations())
+        # Adaptive throughput is a depot-service objective. Synchronize its
+        # physical delivery buckets first, then use that same public signal to
+        # decide whether a cloned autonomy audit is worth running. The clone
+        # remains authoritative and rejects buffered or manually maintained
+        # lines; this detector is intentionally only a cheap candidate gate.
+        self._executing_lease_id = lease_id
+        try:
+            if self._throughput_detector_dirty:
+                self._maybe_capture_throughput_candidate()
+        finally:
+            self._executing_lease_id = None
         delivery_receipt = self._delivery_receipt(executed_tools, delivered_before)
         if character_died:
             deaths = current_frame.deaths
@@ -2070,6 +2702,7 @@ class FLEWorker(FactorioWorker):
                     evidence=latest_death,
                 )
             )
+        status_changes = self._public_status_receipt()
         return ExecutionResult(
             lease_id=lease_id,
             event=event,
@@ -2077,13 +2710,70 @@ class FLEWorker(FactorioWorker):
             production_score=after,
             automated_production_score=automated,
             state_hash=state_hash,
+            research=research_receipt,
+            status_changes=status_changes,
+            evaluation_progress=evaluation_progress,
             events=emitted_events,
             terminal_reason=terminal_reason,
         )
 
     # -- revisioned model-facing state -------------------------------------
 
-    def _production_counters(self, stats: dict[str, Any] | None = None) -> dict[str, dict[str, float]]:
+    def _public_status_receipt(self, *, revision: int | None = None) -> dict[str, Any]:
+        reader = getattr(self.instance.first_namespace, "_public_status", None)
+        if reader is None:
+            return {"available": False, "reason": "status_monitor_unavailable"}
+        journal = getattr(self, "_status_journal", None)
+        if journal is None:
+            journal = self._status_journal = StatusJournal()
+        after_sequence = int(getattr(self, "_status_engine_sequence", -1))
+        try:
+            response = _jsonable(reader(after_sequence))
+        except Exception as exc:
+            return {
+                "available": False,
+                "reason": "status_monitor_read_failed",
+                "error": str(exc)[:300],
+            }
+        if not isinstance(response, dict) or response.get("available") is False:
+            return {"available": False, "reason": "status_monitor_unavailable"}
+        if revision is None:
+            revision = int(getattr(self, "_observation_revision", 0)) + 1
+            self._observation_revision = revision
+        previous_revision = journal.revision
+        engine_gap = after_sequence < int(response.get("retained_after_sequence", 0))
+        samples = response.get("samples") or []
+        if after_sequence == -1:
+            # A new lease starts with current public facts, never old lease events.
+            journal.current = {
+                str(sample["entity_id"]): sample
+                for sample in response.get("current") or []
+            }
+            samples = []
+            engine_gap = False
+        if engine_gap:
+            # An engine ring overrun invalidates comparisons across the gap.
+            journal.current = {
+                str(sample["entity_id"]): sample
+                for sample in response.get("current") or []
+            }
+            journal.evicted_revision = revision
+            samples = []
+        journal.publish(samples, revision=revision)
+        journal.tick = max(journal.tick, int(response.get("tick", journal.tick)))
+        self._status_engine_sequence = int(response.get("engine_sequence", 0))
+        result = journal.query(since_revision=previous_revision, keyframe=True)
+        result.update(
+            available=True,
+            engine_history_expired=engine_gap,
+            sample_interval_ticks=response.get("sample_interval_ticks"),
+            coverage=response.get("coverage"),
+        )
+        return result
+
+    def _production_counters(
+        self, stats: dict[str, Any] | None = None
+    ) -> dict[str, dict[str, float]]:
         if stats is None:
             try:
                 stats = _jsonable(self.instance.first_namespace._get_production_stats())
@@ -2151,7 +2841,9 @@ class FLEWorker(FactorioWorker):
         minutes = span_ticks / 3600.0
         values: dict[str, int | float] = {}
         for item in sorted(set(latest_values) | set(baseline_values)):
-            amount = max(latest_values.get(item, 0.0) - baseline_values.get(item, 0.0), 0.0)
+            amount = max(
+                latest_values.get(item, 0.0) - baseline_values.get(item, 0.0), 0.0
+            )
             if amount <= 1e-9:
                 continue
             rate = amount / minutes
@@ -2261,14 +2953,18 @@ class FLEWorker(FactorioWorker):
             },
         }
 
-    def _research_summary(self, counters: dict[str, dict[str, float]]) -> dict[str, Any]:
+    def _research_summary(
+        self, counters: dict[str, dict[str, float]]
+    ) -> dict[str, Any]:
         state = getattr(self, "_research_cache", None)
-        if state is None:
-            try:
-                state = self.instance.first_namespace._save_research_state(compact=True)
-                self._research_cache = state
-            except Exception:
-                state = None
+        try:
+            # Compact research identity is cheap and must be sampled live:
+            # Factorio 2.0 trigger technologies can complete while machines
+            # advance inside a wait, invalidating an otherwise valid cache.
+            state = self.instance.first_namespace._save_research_state(compact=True)
+            self._research_cache = state
+        except Exception:
+            pass
         identity = research_state_identity(state)
         researched = {
             str(name): value
@@ -2338,7 +3034,11 @@ class FLEWorker(FactorioWorker):
         # A successful intervention clears the unresolved public error; the
         # full action ledger remains queryable for diagnosis.
         last_event = getattr(self, "_action_events", [])[-1:]
-        unresolved = latest if last_event and bool(getattr(last_event[0], "error", False)) else None
+        unresolved = (
+            latest
+            if last_event and bool(getattr(last_event[0], "error", False))
+            else None
+        )
         return {
             "latest": latest,
             "unresolved": [unresolved] if unresolved is not None else [],
@@ -2383,11 +3083,15 @@ class FLEWorker(FactorioWorker):
             "entities": entities,
             "research": research,
             "contracts": contracts if isinstance(contracts, list) else [],
-            "contract_map": self._contract_map(contracts if isinstance(contracts, list) else []),
+            "contract_map": self._contract_map(
+                contracts if isinstance(contracts, list) else []
+            ),
             "customer_depots": _jsonable(list(self._customer_depots_cache)),
             "customer_delivery": delivery,
             "delivery_totals": _numeric_mapping(delivery.get("raw_totals", {})),
-            "manual_delivery_totals": _numeric_mapping(delivery.get("manual_totals", {})),
+            "manual_delivery_totals": _numeric_mapping(
+                delivery.get("manual_totals", {})
+            ),
             "blueprints": _jsonable(self._blueprint_summaries()),
             "errors": self._error_summary(),
         }
@@ -2417,9 +3121,7 @@ class FLEWorker(FactorioWorker):
                 ),
             },
             "delivery_totals": dict(state.get("delivery_totals") or {}),
-            "manual_delivery_totals": dict(
-                state.get("manual_delivery_totals") or {}
-            ),
+            "manual_delivery_totals": dict(state.get("manual_delivery_totals") or {}),
             "entities": {
                 "counts": dict((state.get("entities") or {}).get("counts", {}))
             },
@@ -2480,19 +3182,24 @@ class FLEWorker(FactorioWorker):
             if before_contracts.get(name) != after_contracts.get(name)
             and name in after_contracts
         ]
-        before_errors = (before.get("errors") or {}).get("_keys", set())
-        after_errors = (after.get("errors") or {}).get("_keys", set())
+        # Resume checkpoints pass through JSON, so internal set projections
+        # return as lists. Normalize both sides before set arithmetic.
+        before_errors = set((before.get("errors") or {}).get("_keys", set()))
+        after_errors = set((after.get("errors") or {}).get("_keys", set()))
         new_errors = [
             item
             for item in (after.get("errors") or {}).get("distinct", [])
-            if f"{item.get('sequence')}:{item.get('result', '')}" in after_errors - before_errors
+            if f"{item.get('sequence')}:{item.get('result', '')}"
+            in after_errors - before_errors
         ]
         return {
             "from_revision": before.get("revision"),
             "to_revision": revision,
             "from_tick": before.get("ticks"),
             "to_tick": after.get("ticks"),
-            "inventory": _counter_delta(before.get("inventory", {}), after.get("inventory", {})),
+            "inventory": _counter_delta(
+                before.get("inventory", {}), after.get("inventory", {})
+            ),
             "production": {
                 "input": _counter_delta(
                     before_counters.get("input", {}), after_counters.get("input", {})
@@ -2549,6 +3256,7 @@ class FLEWorker(FactorioWorker):
         revision = int(getattr(self, "_observation_revision", 0)) + 1
         state = self._model_state_snapshot(lease_id)
         state["revision"] = revision
+        status_changes = self._public_status_receipt(revision=revision)
         self._record_production_sample(
             int(state["ticks"]), state["production_counters"], revision=revision
         )
@@ -2651,13 +3359,18 @@ class FLEWorker(FactorioWorker):
             inventory_delta=transition["inventory"],
             delta=public_delta,
             entities=state["entities"],
+            status_changes=status_changes,
             research=research,
+            camera_state=self.camera(lease_id, include_image=False),
+            evaluation_progress=getattr(self, "_evaluation_progress", None),
             errors={
                 key: value
                 for key, value in state["errors"].items()
                 if not key.startswith("_")
             },
-            contracts=[OpenContractView.model_validate(item) for item in state["contracts"]],
+            contracts=[
+                OpenContractView.model_validate(item) for item in state["contracts"]
+            ],
             customer_depots=[
                 CustomerDepotView.model_validate(item)
                 for item in state["customer_depots"]
@@ -2669,6 +3382,146 @@ class FLEWorker(FactorioWorker):
                 BlueprintSummary.model_validate(item) for item in state["blueprints"]
             ],
         )
+
+    def craft_plan(
+        self, lease_id: str, *, product: str, quantity: int = 1, depth: int = 2
+    ) -> dict[str, Any]:
+        del lease_id
+        return _jsonable(
+            self.instance.first_namespace.get_craft_plan(product, quantity, depth)
+        )
+
+    def _public_view(self, radius: int = 32, entity_limit: int = 32) -> dict[str, Any]:
+        reader = getattr(self.instance.first_namespace, "_public_view", None)
+        if reader is None:
+            return {"available": False, "reason": "public_view_unavailable"}
+        try:
+            result = _jsonable(reader(radius, entity_limit))
+            if not isinstance(result, dict):
+                raise ValueError("public view returned a non-object response")
+            return result
+        except Exception as exc:
+            return {
+                "available": False,
+                "reason": "public_view_read_failed",
+                "error": str(exc)[:300],
+            }
+
+    def camera(
+        self,
+        lease_id: str,
+        *,
+        settings: dict[str, Any] | None = None,
+        include_image: bool = True,
+    ) -> dict[str, Any]:
+        current = getattr(self, "_camera_settings", CameraSettings())
+        if settings is not None:
+            current = CameraSettings.model_validate(
+                {**current.model_dump(), **settings}
+            )
+            self._camera_settings = current
+        task = getattr(self, "task_spec", None)
+        objective: dict[str, Any] = {
+            "goal": task.goal[:1200] if task else "",
+            "mode": (task.evaluation_mode or "requisitions") if task else "unknown",
+            "revision": getattr(self, "_observation_revision", 0),
+        }
+        progress = getattr(self, "_evaluation_progress", None)
+        if progress is not None:
+            objective["progress"] = _jsonable(progress)
+        elif task is not None:
+            orders = [item for item in self._contracts_view() if item.status == "open"]
+            objective["orders"] = _jsonable(orders[-4:])
+            objective["orders_truncated"] = len(orders) > 4
+        result: dict[str, Any] = {
+            "settings": current.model_dump(),
+            "objective": objective,
+        }
+        if not current.enabled:
+            return {**result, "available": True, "enabled": False}
+        view = self._public_view(current.radius, current.entity_limit)
+        result.update(compact_terrain(view))
+        if include_image and view.get("available"):
+            try:
+                if current.radius >= 96:
+                    png = render_coarse_map(view)
+                    result.update(
+                        image_base64=base64.b64encode(png).decode("ascii"),
+                        media_type="image/png",
+                        image_sha256=hashlib.sha256(png).hexdigest(),
+                        image_bytes=len(png),
+                    )
+                else:
+                    rendered = self.render_factory(
+                        lease_id,
+                        radius=current.radius,
+                        camera_entities=view.get("entities", []),
+                    )
+                    result.update(
+                        {
+                            key: rendered[key]
+                            for key in (
+                                "image_base64",
+                                "media_type",
+                                "image_sha256",
+                                "image_bytes",
+                                "viewport",
+                            )
+                        }
+                    )
+            except Exception as exc:
+                result["image_error"] = str(exc)[:300]
+        return result
+
+    def render_factory(
+        self,
+        lease_id: str,
+        *,
+        center_x: float | None = None,
+        center_y: float | None = None,
+        radius: int = 32,
+        include_status: bool = True,
+        camera_entities: list[dict[str, Any]] | None = None,
+    ) -> dict[str, Any]:
+        del lease_id
+        if (center_x is None) != (center_y is None):
+            raise ValueError("center_x and center_y must be provided together")
+        if not 8 <= int(radius) <= 96:
+            raise ValueError("radius must be between 8 and 96 tiles")
+        position = (
+            None if center_x is None else Position(x=float(center_x), y=float(center_y))
+        )
+        rendered = self.instance.namespace._render(
+            position=position,
+            radius=int(radius),
+            max_render_radius=int(radius),
+            include_status=bool(include_status),
+            camera_entities=camera_entities,
+        )
+        png = rendered._repr_png_()
+        viewport = rendered.viewport
+        return {
+            "schema_version": "factorio-factory-render-v1",
+            "media_type": "image/png",
+            "image_base64": base64.b64encode(png).decode("ascii"),
+            "image_sha256": hashlib.sha256(png).hexdigest(),
+            "image_bytes": len(png),
+            "ticks": self._episode_tick(),
+            "include_status": bool(include_status),
+            "viewport": {
+                "world_min_x": viewport.world_min_x,
+                "world_min_y": viewport.world_min_y,
+                "world_max_x": viewport.world_max_x,
+                "world_max_y": viewport.world_max_y,
+                "center_x": viewport.center_x,
+                "center_y": viewport.center_y,
+                "width_tiles": viewport.width_tiles,
+                "height_tiles": viewport.height_tiles,
+                "image_width": viewport.image_width,
+                "image_height": viewport.image_height,
+                "pixels_per_tile": viewport.scaling,
+            },
+        }
 
     def _public_epoch_outcome(self, outcome: ContractEpochOutcome) -> dict[str, Any]:
         """Strip rating/audit internals before historical contract retrieval."""
@@ -2709,11 +3562,17 @@ class FLEWorker(FactorioWorker):
                 wanted = str(entity_type).strip().lower().replace("_", "-")
                 for candidate in Prototype:
                     value = candidate.value[0]
-                    if str(value).lower() == wanted or candidate.name.lower().replace("_", "-") == wanted:
+                    if (
+                        str(value).lower() == wanted
+                        or candidate.name.lower().replace("_", "-") == wanted
+                    ):
                         prototype = candidate
                         break
                 if prototype is None:
-                    return {"entities": [], "error": f"unknown entity type: {entity_type}"}
+                    return {
+                        "entities": [],
+                        "error": f"unknown entity type: {entity_type}",
+                    }
             kwargs: dict[str, Any] = {}
             if area:
                 x = float(area.get("x", 0.0))
@@ -2768,6 +3627,7 @@ class FLEWorker(FactorioWorker):
 
         allowed = {
             "inventory",
+            "alerts",
             "production",
             "delivery",
             "entities",
@@ -2779,12 +3639,35 @@ class FLEWorker(FactorioWorker):
         if kind not in allowed:
             raise ValueError(f"kind must be one of {sorted(allowed)}")
         limit = max(1, min(int(limit), MODEL_HISTORY_QUERY_LIMIT))
+        if kind == "alerts":
+            receipt = self._public_status_receipt()
+            if not receipt.get("available"):
+                return {"lease_id": lease_id, "kind": kind, **receipt}
+            journal = self._status_journal
+            from_tick = None
+            if window_seconds is not None:
+                from_tick = max(0, journal.tick - int(window_seconds) * 60)
+            return {
+                "lease_id": lease_id,
+                "kind": kind,
+                "coverage": receipt.get("coverage"),
+                "sample_interval_ticks": receipt.get("sample_interval_ticks"),
+                **journal.query(
+                    since_revision=since_revision,
+                    from_tick=from_tick,
+                    limit=limit,
+                    severity_first=True,
+                    keyframe=True,
+                ),
+            }
         self._sync_customer()
         self._sync_active_order()
         current = getattr(self, "_latest_model_state", None)
         if current is None:
             current = self._model_state_snapshot(lease_id)
-        revision = int(current.get("revision", getattr(self, "_observation_revision", 0)))
+        revision = int(
+            current.get("revision", getattr(self, "_observation_revision", 0))
+        )
         if since_revision is not None:
             try:
                 since_revision = int(since_revision)
@@ -2820,23 +3703,57 @@ class FLEWorker(FactorioWorker):
             result["samples"] = samples[-limit:]
             result["history_truncated"] = len(samples) > limit
         elif kind == "production":
+            reader = getattr(
+                self.instance.first_namespace, "get_production_statistics", None
+            )
+            if callable(reader):
+                native_window = next(
+                    (
+                        value
+                        for value in (5, 60, 600, 3600)
+                        if value >= (window_seconds or 60)
+                    ),
+                    3600,
+                )
+                result["statistics"] = {
+                    category: reader(
+                        items=[item] if item else None,
+                        window_seconds=native_window,
+                        category=category,
+                        limit=min(limit, 64),
+                    )
+                    for category in ("item", "fluid")
+                }
             samples = list(getattr(self, "_production_history", []))
             cutoff_tick = None
             if window_seconds is not None:
-                cutoff_tick = int(current.get("ticks", 0)) - max(0, int(window_seconds)) * 60
+                cutoff_tick = (
+                    int(current.get("ticks", 0)) - max(0, int(window_seconds)) * 60
+                )
             selected = [
                 sample
                 for sample in samples
-                if (since_revision is None or int(sample.get("revision", 0)) > since_revision)
+                if (
+                    since_revision is None
+                    or int(sample.get("revision", 0)) > since_revision
+                )
                 and (cutoff_tick is None or int(sample.get("tick", 0)) >= cutoff_tick)
-                and (item is None or item in sample.get("output", {}) or item in sample.get("input", {}))
+                and (
+                    item is None
+                    or item in sample.get("output", {})
+                    or item in sample.get("input", {})
+                )
             ]
             if item:
                 selected = [
                     {
                         **sample,
-                        "input": {item: sample.get("input", {}).get(item, 0)} if item in sample.get("input", {}) else {},
-                        "output": {item: sample.get("output", {}).get(item, 0)} if item in sample.get("output", {}) else {},
+                        "input": {item: sample.get("input", {}).get(item, 0)}
+                        if item in sample.get("input", {})
+                        else {},
+                        "output": {item: sample.get("output", {}).get(item, 0)}
+                        if item in sample.get("output", {})
+                        else {},
                     }
                     for sample in selected
                 ]
@@ -2854,7 +3771,9 @@ class FLEWorker(FactorioWorker):
             ]
             cutoff_tick = None
             if window_seconds is not None:
-                cutoff_tick = int(current.get("ticks", 0)) - max(0, int(window_seconds)) * 60
+                cutoff_tick = (
+                    int(current.get("ticks", 0)) - max(0, int(window_seconds)) * 60
+                )
             if since_revision is not None:
                 revision_ticks = [
                     int(state.get("ticks", 0))
@@ -2897,7 +3816,11 @@ class FLEWorker(FactorioWorker):
             result["current"] = current.get("entities", {})
             result["mutations"] = mutations[-limit:]
             result["history_truncated"] = len(mutations) > limit
-            result.update(self._query_entity_details(entity_type=entity_type, area=area, limit=limit))
+            result.update(
+                self._query_entity_details(
+                    entity_type=entity_type, area=area, limit=limit
+                )
+            )
         elif kind == "research":
             changes = []
             public_history = list(getattr(self, "_public_state_history", []))
@@ -2927,7 +3850,9 @@ class FLEWorker(FactorioWorker):
                 self._public_epoch_outcome(outcome)
                 for outcome in list(getattr(self, "_epoch_records", []))[-limit:]
             ]
-            result["history_truncated"] = len(getattr(self, "_epoch_records", [])) > limit
+            result["history_truncated"] = (
+                len(getattr(self, "_epoch_records", [])) > limit
+            )
         elif kind == "errors":
             errors = []
             for event in getattr(self, "_action_events", []):
@@ -2965,8 +3890,7 @@ class FLEWorker(FactorioWorker):
         if authoritative and audit is not None and audit.passed:
             line_scores = {
                 product: min(
-                    audit.depot_rates_per_minute.get(product, 0.0)
-                    / max(target, 1e-9),
+                    audit.depot_rates_per_minute.get(product, 0.0) / max(target, 1e-9),
                     1.0,
                 )
                 for product, target in audit.target_rates_per_minute.items()
@@ -2993,9 +3917,7 @@ class FLEWorker(FactorioWorker):
                 target_rate_per_minute=audit.target_rates_per_minute,
                 line_scores=line_scores,
                 performance_score=(
-                    sum(line_scores.values()) / len(line_scores)
-                    if line_scores
-                    else 0.0
+                    sum(line_scores.values()) / len(line_scores) if line_scores else 0.0
                 ),
                 interventions_during_window=0,
                 contract_status="fulfilled",
@@ -3034,9 +3956,17 @@ class FLEWorker(FactorioWorker):
         start_tick = self._episode_tick()
         self._state_hash_dirty = True
         self._research_cache = None
-        self.instance.set_speed_and_unpause(10)
+        self.instance.set_speed_and_unpause(
+            getattr(self, "_execution_game_speed", 10.0)
+        )
         try:
-            self.instance.first_namespace.sleep(window_seconds)
+            # The public sleep action is bounded to 15 seconds. A verifier
+            # window is longer, but must retain the same native-tick semantics.
+            remaining_seconds = window_seconds
+            while remaining_seconds > 0:
+                chunk_seconds = min(15, remaining_seconds)
+                self.instance.first_namespace.sleep(chunk_seconds)
+                remaining_seconds -= chunk_seconds
         finally:
             self.instance.pause()
 
@@ -3075,9 +4005,7 @@ class FLEWorker(FactorioWorker):
             for product, amount in delivered.items()
         }
         line_scores = {
-            product: round(
-                min(rates.get(product, 0.0) / max(target, 1e-9), 1.0), 6
-            )
+            product: round(min(rates.get(product, 0.0) / max(target, 1e-9), 1.0), 6)
             for product, target in targets.items()
         }
         result = ThroughputCheckResult(
@@ -3138,13 +4066,18 @@ class FLEWorker(FactorioWorker):
                     if objective.kind != "throughput" or objective.target is None:
                         continue
                     window_seconds = float(objective.window_seconds or 60)
-                    rates = self._throughput_audit_result.production_subwindow_rates.get(
-                        str(objective.target), []
+                    rates = (
+                        self._throughput_audit_result.production_subwindow_rates.get(
+                            str(objective.target), []
+                        )
                     )
                     precomputed_throughput[objective.objective_id] = [
                         rate * window_seconds / 60.0 for rate in rates
                     ]
-            self.instance.set_speed_and_unpause(10)
+            if not task.evaluation_mode:
+                self.instance.set_speed_and_unpause(
+                    getattr(self, "_execution_game_speed", 10.0)
+                )
             try:
                 # Holdout windows advance the world; the memoized hash must
                 # not survive them.
@@ -3157,6 +4090,13 @@ class FLEWorker(FactorioWorker):
                     self.initial_telemetry,
                     customer_result=customer_result,
                     precomputed_throughput_measurements=precomputed_throughput,
+                    final_telemetry=(
+                        self._capture_frame(
+                            [o.target for o in task.objectives if o.target]
+                        )
+                        if task.evaluation_mode
+                        else None
+                    ),
                 )
             finally:
                 self.instance.pause()
@@ -3270,7 +4210,9 @@ class FLEWorker(FactorioWorker):
                 privileged_transitions=self.privileged_transitions,
             )
 
-        self.instance.set_speed_and_unpause(10)
+        self.instance.set_speed_and_unpause(
+            getattr(self, "_execution_game_speed", 10.0)
+        )
         try:
             response = self.task.verify(production, self.instance, step_statistics={})
         finally:

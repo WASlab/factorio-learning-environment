@@ -3,8 +3,6 @@ storage.actions.inspect_inventory = function(player_index, is_character_inventor
     -- Ensure we have a valid character, recreating if necessary
     local player = storage.utils.ensure_valid_character(player_index)
     local surface = player.surface
-    local is_fast = storage.fast
-    local automatic_close = True
 
     local function get_player_inventory_items(player)
 
@@ -39,18 +37,6 @@ storage.actions.inspect_inventory = function(player_index, is_character_inventor
        end
        if not closest_entity or not closest_entity.valid then
            error("No valid entity at given coordinates.")
-       end
-
-       if not is_fast then
-           player.opened = closest_entity
-           script.on_nth_tick(60, function()
-               if automatic_close == True then
-                   if closest_entity and closest_entity.valid then
-                       player.opened = nil
-                   end
-                   automatic_close = False
-               end
-           end)
        end
 
        -- Factorio 2.0: unified crafter_input/crafter_output for furnaces, assemblers, rocket silos

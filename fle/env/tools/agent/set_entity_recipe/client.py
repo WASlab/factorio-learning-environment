@@ -16,6 +16,7 @@ class SetEntityRecipe(Tool):
         """
 
         x, y = entity.position.x, entity.position.y
+        self.ensure_reachable(entity)
 
         if not isinstance(recipe, RecipeName):
             raise ValueError(

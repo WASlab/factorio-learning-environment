@@ -1,4 +1,4 @@
-"""Deterministic customer policy for adaptive evaluation.
+"""Deterministic autonomous-throughput policy for adaptive evaluation.
 
 This module deliberately borrows *signals* from PLR and ACCEL without
 importing their training replay machinery.  The customer chooses among
@@ -12,10 +12,10 @@ The policy keeps three kinds of factory evidence separate:
 * observed production (the passive snapshot reports a positive rate), and
 * sustained depot evidence (positive delivery across a sustained window).
 
-An attempted order by itself is never evidence of capacity.  This distinction
-is important for zero-delivery failures: they may create useful capability
-progress and therefore deserve replay, but they must not inflate a later
-throughput order.
+Only sustained depot evidence or provenance-safe automated production may
+size a later target. Customer quantities remain wire-level accounting: every
+plan is an autonomous rate qualification and manual delivery cannot establish
+capacity.
 """
 
 from __future__ import annotations
@@ -49,7 +49,7 @@ from fle.envd.models import (
 # ``LANE_*`` remains exported for old audit readers.  It is no longer the
 # decision authority: intent utilities below are recomputed from state and
 # evidence for every selection.
-POLICY_VERSION = "evidence-driven-customer-v5"
+POLICY_VERSION = "autonomous-throughput-policy-v2"
 
 LANE_SCHEDULE: tuple[str, ...] = (
     "anchor",
@@ -105,13 +105,26 @@ MIN_COMMISSIONING_DEADLINE_TICKS = 15 * TICKS_PER_MINUTE
 MAX_COMMISSIONING_DEADLINE_TICKS = 4 * 60 * TICKS_PER_MINUTE
 MIN_SERVICE_DEADLINE_TICKS = 10 * TICKS_PER_MINUTE
 MAX_SERVICE_DEADLINE_TICKS = 4 * 60 * TICKS_PER_MINUTE
-# A commissioning probe creates pressure to automate without treating a
-# hand-delivered burst as a throughput estimate.
+# Cold-start rates are deliberately modest. Difficulty comes from constructing
+# the missing production chain, not from requesting a large terminal batch.
 COMMISSIONING_PROBE_WINDOW_MINUTES = 45.0
 COMMISSIONING_PROBE_RATE_FRACTION = 0.10
+COLD_START_BASE_MINUTES = 45.0
+COLD_START_DEPTH_MINUTES = 10.0
+COLD_START_MISSING_TECH_MINUTES = 20.0
 FRONTIER_MAX_BAND_STEP = 1
 EPSILON = 1e-9
 SUSTAINED_CERTIFICATION_SCORE = 0.60
+FOUNDATION_PRODUCTS = frozenset(
+    {
+        "iron-plate",
+        "copper-plate",
+        "stone-brick",
+        "iron-gear-wheel",
+        "transport-belt",
+        "inserter",
+    }
+)
 
 
 @dataclass
@@ -151,7 +164,9 @@ class ProductEvidence:
 
     @property
     def completion_mean(self) -> float:
-        return statistics.fmean(self.completion_scores) if self.completion_scores else 0.0
+        return (
+            statistics.fmean(self.completion_scores) if self.completion_scores else 0.0
+        )
 
     @property
     def positive_delivery(self) -> bool:
@@ -160,11 +175,15 @@ class ProductEvidence:
         # ``delivered_rates`` was the original public field.  Treat a manually
         # constructed legacy record containing it as positive delivery while
         # still refusing records that contain only ``attempts``.
-        return self.positive_delivery_count > 0 or any(rate > 0 for rate in self.delivered_rates)
+        return self.positive_delivery_count > 0 or any(
+            rate > 0 for rate in self.delivered_rates
+        )
 
     @property
     def observed_production(self) -> bool:
-        return self.observed_production_count > 0 or any(rate > 0 for rate in self.measured_rates)
+        return self.observed_production_count > 0 or any(
+            rate > 0 for rate in self.measured_rates
+        )
 
     @property
     def automated_capacity_evidence(self) -> bool:
@@ -196,10 +215,7 @@ class ProductEvidence:
     def empirical_depot_rates(self) -> list[float]:
         """Windowed customer-sink rates, including zero-service windows."""
 
-        return [
-            max(float(rate), 0.0)
-            for rate in self.sustained_window_rates
-        ]
+        return [max(float(rate), 0.0) for rate in self.sustained_window_rates]
 
     @property
     def empirical_rates(self) -> list[float]:
@@ -247,9 +263,11 @@ class EvidenceDrivenCustomerPolicy:
         self.completed_epochs = 0
         self.frontier_failure_streak = 0
         self.frontier_success_count = 0
+        self.success_streak = 0
         self._last_lane: str | None = None
         self._last_product: str | None = None
         self._last_epoch_outcome: str | None = None
+        self._last_was_mixed = False
         # A structural retry is an immediate follow-up, not a permanent lane.
         # Remembering the consumed epoch prevents a failed target from
         # capturing every subsequent order when no other evidence changes.
@@ -270,7 +288,9 @@ class EvidenceDrivenCustomerPolicy:
         if outcome.status in {"infrastructure_error", "invalid"}:
             return
 
-        elapsed_minutes = max(float(outcome.simulation_ticks_used) / TICKS_PER_MINUTE, 1e-6)
+        elapsed_minutes = max(
+            float(outcome.simulation_ticks_used) / TICKS_PER_MINUTE, 1e-6
+        )
         lines = spec.products or (
             ProductDemandSpec(product=spec.item_name, quantity=float(spec.quantity)),
         )
@@ -306,9 +326,10 @@ class EvidenceDrivenCustomerPolicy:
                 or bool(set(delta.new_recipes) & target_products)
             )
         )
-        sustained_windows = self._window_evidence(outcome)
         for line in lines:
-            record = self.records.setdefault(line.product, ProductEvidence(line.product))
+            record = self.records.setdefault(
+                line.product, ProductEvidence(line.product)
+            )
             delivered_value = delivered_map.get(line.product, 0.0)
             if line.product not in delivered_map and len(lines) == 1:
                 # Preserve compatibility with pre-v2 outcomes that only
@@ -318,14 +339,13 @@ class EvidenceDrivenCustomerPolicy:
                 max(float(delivered_value), 0.0),
                 float(line.quantity),
             )
-            line_windows = sustained_windows.get(line.product, ())
-            score = (
-                statistics.fmean(window_score for window_score, _ in line_windows)
-                if spec.order_kind == "sustained" and line_windows
-                else min(delivered / max(float(line.quantity), EPSILON), 1.0)
+            qualified = bool(
+                outcome.throughput_audit is not None and outcome.throughput_audit.passed
             )
+            # Failed autonomous audits remain diagnostics, never reward.
+            score = 1.0 if qualified else 0.0
             record.attempts += 1
-            record.fulfilled += int(score >= 1.0 - EPSILON)
+            record.fulfilled += int(qualified)
             record.last_epoch = spec.epoch_index
             record.last_status = outcome.status
             record.last_quantity = float(line.quantity)
@@ -344,34 +364,14 @@ class EvidenceDrivenCustomerPolicy:
                 if post_context is not None
                 else 0.0
             )
-            # A passing intervention-free audit is provenance-safe even when
-            # the public post-context has no rate yet (for example, a probe
-            # that was completed in the cloned holdout). Manual probe service
-            # never reaches this path because it is neither authoritative nor
-            # audit-backed.
-            authoritative = outcome.autonomous_throughput
-            if (
-                authoritative is not None
-                and authoritative.authoritative
-                and authoritative.interventions_during_window == 0
-                and authoritative.performance_score >= SUSTAINED_CERTIFICATION_SCORE
-            ):
-                measured = max(
-                    measured,
-                    float(
-                        (authoritative.observed_rate_per_minute or {}).get(
-                            line.product, 0.0
-                        )
-                    ),
-                )
+            # A passing cloned audit is provenance-safe even when the public
+            # post-context has no rate yet.
             audit = outcome.throughput_audit
             if audit is not None and audit.passed:
                 measured = max(
                     measured,
                     float(
-                        (audit.production_rates_per_minute or {}).get(
-                            line.product, 0.0
-                        )
+                        (audit.production_rates_per_minute or {}).get(line.product, 0.0)
                     ),
                 )
             if measured > EPSILON:
@@ -383,54 +383,63 @@ class EvidenceDrivenCustomerPolicy:
                 if depot_rate > EPSILON:
                     record.measured_depot_rates.append(depot_rate)
 
-            is_commissioning_probe = bool(
-                spec.order_kind == "sustained"
-                and (spec.policy_evidence or {}).get("commissioning_probe")
-            )
             if spec.order_kind == "sustained":
-                if is_commissioning_probe:
-                    # Keep probe delivery as ordinary positive evidence, but
-                    # do not let manual service create sustained-capacity evidence.
-                    record.commissioning_probe_count += 1
-                    record.last_commissioning_probe_epoch = spec.epoch_index
-                    if outcome.status != "fulfilled" or score < 1.0 - EPSILON:
-                        record.commissioning_probe_failure_count += 1
-                else:
-                    for window_score, window_rate in line_windows:
-                        record.sustained_window_scores.append(window_score)
-                        # Zero windows are part of the throughput distribution;
-                        # dropping them would inflate the next target rate.
-                        record.sustained_window_rates.append(max(window_rate, 0.0))
-                    # Only per-window evidence establishes sustained service.
-                    # Aggregate delivery remains positive-delivery evidence but
-                    # cannot by itself authorize a throughput target.
-                    if (
-                        line_windows
-                        and score >= SUSTAINED_CERTIFICATION_SCORE
-                        and any(rate > EPSILON for _, rate in line_windows)
-                    ):
-                        record.sustained_depot_count += 1
+                audited_windows = (
+                    list(
+                        outcome.throughput_audit.depot_subwindow_rates.get(
+                            line.product, ()
+                        )
+                    )
+                    if outcome.throughput_audit is not None
+                    else []
+                )
+                target_rate = (
+                    float(
+                        outcome.throughput_audit.target_rates_per_minute.get(
+                            line.product, 0.0
+                        )
+                    )
+                    if outcome.throughput_audit is not None
+                    else 0.0
+                )
+                for window_rate in audited_windows:
+                    record.sustained_window_rates.append(max(float(window_rate), 0.0))
+                    record.sustained_window_scores.append(
+                        min(
+                            max(float(window_rate) / max(target_rate, EPSILON), 0.0),
+                            1.0,
+                        )
+                    )
+                if qualified and audited_windows:
+                    record.sustained_depot_count += 1
 
             # A capability delta names the primary target.  Do not credit a
             # secondary mixed-order line for progress it did not unlock.
             line_progress = progress and (
-                len(lines) == 1 or (delta is not None and line.product == delta.target_id)
+                len(lines) == 1
+                or (delta is not None and line.product == delta.target_id)
             )
             if line_progress:
                 record.capability_progress_count += 1
                 record.last_capability_progress_epoch = spec.epoch_index
 
-            if outcome.status != "fulfilled" or score < 1.0 - EPSILON:
+            if not qualified:
                 record.failure_streak += 1
             else:
                 record.failure_streak = 0
-                if not is_commissioning_probe and positive:
+                if positive:
                     record.last_non_probe_success_epoch = spec.epoch_index
             self.recent_products.append(line.product)
 
         selected_intent = (spec.policy_evidence or {}).get("intent")
+        qualified_success = bool(
+            outcome.status == "fulfilled"
+            and outcome.throughput_audit is not None
+            and outcome.throughput_audit.passed
+        )
+        self.success_streak = self.success_streak + 1 if qualified_success else 0
         if selected_intent == "expand" or spec.mixture_class == "frontier":
-            if outcome.status == "fulfilled":
+            if qualified_success:
                 self.frontier_failure_streak = 0
                 self.frontier_success_count += 1
             else:
@@ -438,6 +447,7 @@ class EvidenceDrivenCustomerPolicy:
         self.completed_epochs = max(self.completed_epochs, spec.epoch_index)
         self._last_product = spec.item_name
         self._last_epoch_outcome = outcome.status
+        self._last_was_mixed = len(lines) > 1
 
     @staticmethod
     def _window_evidence(
@@ -509,9 +519,7 @@ class EvidenceDrivenCustomerPolicy:
                         accepted = 0.0
                     sustained_score = values.get("sustained_service_score", 0.0)
                     aggregate_rate = (
-                        accepted / window_minutes
-                        if window_minutes > 0
-                        else 0.0
+                        accepted / window_minutes if window_minutes > 0 else 0.0
                     )
                     converted = [
                         {
@@ -560,9 +568,7 @@ class EvidenceDrivenCustomerPolicy:
                 continue
             for value in values:
                 value_product = (
-                    value.get("product")
-                    if isinstance(value, dict)
-                    else None
+                    value.get("product") if isinstance(value, dict) else None
                 )
                 normalized_product = str(value_product or product)
                 score = rate = 0.0
@@ -612,6 +618,19 @@ class EvidenceDrivenCustomerPolicy:
         candidates = self._representatives(pool)
         if not candidates:
             raise ValueError("evidence policy received no accepted candidates")
+        has_certified_foundation = any(
+            self.records.get(product) is not None
+            and self.records[product].sustained_evidence
+            for product in FOUNDATION_PRODUCTS
+        )
+        if not has_certified_foundation:
+            foundation = [
+                candidate
+                for candidate in candidates
+                if candidate.item_name in FOUNDATION_PRODUCTS
+            ]
+            if foundation:
+                candidates = foundation
         current_rating = rating or CapabilityRating(
             mu=0.0,
             sigma=2.0,
@@ -629,12 +648,11 @@ class EvidenceDrivenCustomerPolicy:
                 for primary in self._candidates_for_intent(
                     candidates, intent=intent, context=context, recovery=recovery
                 ):
-                    secondary = self._secondary_candidate_for_compose(
+                    chosen = self._composition_candidates(
                         primary, candidates=candidates, context=context
                     )
-                    if secondary is None:
+                    if len(chosen) < 2:
                         continue
-                    chosen = [primary, secondary]
                     score, components = self._intent_utility(
                         chosen,
                         intent=intent,
@@ -645,25 +663,28 @@ class EvidenceDrivenCustomerPolicy:
                     components["seed_jitter"] = round(
                         score - sum(components.values()), 6
                     )
-                    reason = "mixed_probe_uncertainty" if any(
-                        not self._has_evidence(c, context) for c in chosen
-                    ) else "mixed_probe_composition"
+                    reason = (
+                        "mixed_probe_uncertainty"
+                        if any(not self._has_evidence(c, context) for c in chosen)
+                        else "mixed_probe_composition"
+                    )
                     proposals.append(
                         (
                             intent,
                             chosen,
                             "throughput"
                             if all(
-                                self._has_automated_capacity(c, context)
-                                for c in chosen
+                                self._has_automated_capacity(c, context) for c in chosen
                             )
-                            else "consolidation",
+                            else "commissioning",
                             reason,
                             components,
                             "anchor",
                         )
                     )
-                    intent_utilities[intent] = max(intent_utilities.get(intent, -math.inf), score)
+                    intent_utilities[intent] = max(
+                        intent_utilities.get(intent, -math.inf), score
+                    )
                 continue
 
             eligible = self._candidates_for_intent(
@@ -677,9 +698,7 @@ class EvidenceDrivenCustomerPolicy:
                     rating=current_rating,
                 )
                 score += rng.random() * 0.05
-                components["seed_jitter"] = round(
-                    score - sum(components.values()), 6
-                )
+                components["seed_jitter"] = round(score - sum(components.values()), 6)
                 reason = self._intent_reason(intent, primary, context)
                 mode = self._mode_for_intent(
                     primary, intent=intent, context=context, rng=rng
@@ -741,7 +760,9 @@ class EvidenceDrivenCustomerPolicy:
         selected.plan.evidence["selected_utility"] = round(selected.score, 6)
         selected.plan.evidence["selected_intent"] = selected.intent
         if selected.intent == "recover":
-            self._recovery_consumed_epochs[selected.plan.candidate.item_name] = self.completed_epochs
+            self._recovery_consumed_epochs[selected.plan.candidate.item_name] = (
+                self.completed_epochs
+            )
         self._last_lane = selected.lane
         return selected.plan
 
@@ -910,10 +931,16 @@ class EvidenceDrivenCustomerPolicy:
             distance = abs(difficulty - rating.mu) / max(float(rating.sigma), 0.5)
             nearness = math.exp(-distance)
             local_difficulty = min(max(difficulty / 10.0, 0.0), 1.0)
-            recent = min(
-                sum(candidate.item_name == product for product in self.recent_products),
-                2,
-            ) / 2.0
+            recent = (
+                min(
+                    sum(
+                        candidate.item_name == product
+                        for product in self.recent_products
+                    ),
+                    2,
+                )
+                / 2.0
+            )
             rate = min(self._live_rate(context, candidate.item_name) / 60.0, 1.0)
             terms.append(
                 {
@@ -930,24 +957,27 @@ class EvidenceDrivenCustomerPolicy:
                 }
             )
 
-        mean = lambda key: statistics.fmean(term[key] for term in terms)
+        def mean(key):
+            return statistics.fmean(term[key] for term in terms)
+
+        success_momentum = min(self.success_streak, 3) / 3.0
         components: dict[str, float]
         if intent == "expand":
-            # Breadth receives a slight preference over a speculative frontier
-            # so the first orders establish a measurable baseline, after which
-            # a nearby frontier naturally wins as breadth becomes certified.
+            # Cold-start breadth establishes a baseline. Consecutive autonomous
+            # wins then retire that novelty bonus; a successful mixed probe is
+            # the strongest evidence that the factory is ready for a local
+            # frontier. Readiness is session evidence, never the circular test
+            # of whether the unseen frontier product already has capacity.
             frontier = float(chosen[0].mixture_class == "frontier")
-            frontier_readiness = mean("capacity")
+            breadth_scale = max(1.0 - 0.60 * success_momentum, 0.25)
             components = {
                 "base": 1.0,
                 "uncertainty_value": 1.25 * mean("uncertainty"),
-                "breadth_value": 1.35 * mean("breadth"),
-                # A cold frontier probe waits until basic breadth has been
-                # sampled, while certified capacity earns a positive push.
+                "breadth_value": 1.35 * mean("breadth") * breadth_scale,
                 "frontier_value": frontier
                 * (
-                    0.35 * frontier_readiness
-                    - 0.20 * (1.0 - frontier_readiness)
+                    0.15 * min(self.success_streak, 2)
+                    + 1.75 * float(self._last_was_mixed)
                 ),
                 "rating_value": 0.35 * mean("rating_nearness"),
                 "difficulty_cost": -0.35 * mean("difficulty_pressure"),
@@ -977,6 +1007,9 @@ class EvidenceDrivenCustomerPolicy:
                 "difficulty_cost": -0.40 * mean("difficulty_pressure"),
                 "recent_cost": -0.70 * mean("recent_penalty"),
                 "frontier_pair_cost": -0.40 * frontier_pair * mean("breadth"),
+                "success_momentum_value": 1.80 * success_momentum,
+                "repeat_composition_cost": (-0.50 if self.success_streak >= 3 else -2.0)
+                * float(self._last_was_mixed),
             }
         elif intent == "recover":
             components = {
@@ -1002,6 +1035,7 @@ class EvidenceDrivenCustomerPolicy:
                 "capacity_value": 0.80 * mean("live_capacity"),
                 "rating_value": 0.40 * mean("rating_nearness"),
                 "staleness_value": 0.20 * mean("staleness"),
+                "success_momentum_value": 1.10 * success_momentum,
                 "recent_cost": -0.65 * mean("recent_penalty"),
             }
         else:
@@ -1023,28 +1057,14 @@ class EvidenceDrivenCustomerPolicy:
         if intent == "stress":
             return "accel_stress"
         if intent == "deepen":
-            # A one-shot delivery proves only that some items reached the
-            # customer. Escalate to sustained service after provenance-safe
-            # automated production or a sustained depot window is observed.
             if self._has_automated_capacity(candidate, context):
                 return "throughput"
-            record = self.records.get(candidate.item_name)
-            if record is None or not record.positive_delivery:
-                return "consolidation"
-            recovery_epoch = max(
-                record.last_non_probe_success_epoch,
-                record.last_capability_progress_epoch,
-            )
-            probe_available = record.commissioning_probe_count == 0 or (
-                record.commissioning_probe_failure_count > 0
-                and recovery_epoch > record.last_commissioning_probe_epoch
-            )
-            return "sustained_commissioning" if probe_available else "consolidation"
+            return "commissioning"
         if intent == "retain":
             return (
                 "throughput"
                 if self._has_automated_capacity(candidate, context)
-                else "consolidation"
+                else "commissioning"
             )
         return self._mode_for(
             candidate,
@@ -1061,6 +1081,20 @@ class EvidenceDrivenCustomerPolicy:
         candidates: list[ContractCandidate],
         context: ContractContextSnapshot,
     ) -> ContractCandidate | None:
+        chosen = self._composition_candidates(
+            primary, candidates=candidates, context=context
+        )
+        return chosen[1] if len(chosen) > 1 else None
+
+    def _composition_candidates(
+        self,
+        primary: ContractCandidate,
+        *,
+        candidates: list[ContractCandidate],
+        context: ContractContextSnapshot,
+    ) -> list[ContractCandidate]:
+        """Build a mixed service vector that grows with proven capability."""
+
         alternatives = [
             candidate
             for candidate in candidates
@@ -1074,17 +1108,37 @@ class EvidenceDrivenCustomerPolicy:
             )
         ]
         if not alternatives:
-            return None
-        # Prefer a less-recent, lower-difficulty partner, but do not filter on
-        # evidence: mixed probes are valuable precisely when both lines are new.
-        return min(
-            alternatives,
-            key=lambda candidate: (
-                sum(candidate.item_name == product for product in self.recent_products),
-                float(candidate.effective_difficulty or 0.0),
-                candidate.item_name,
-            ),
+            return [primary]
+        certified_count = sum(
+            bool(record.sustained_reliable) for record in self.records.values()
         )
+        target_count = min(
+            len(candidates),
+            2 + min(4, self.success_streak // 2 + certified_count // 3),
+        )
+        chosen = [primary]
+        remaining = list(alternatives)
+        while remaining and len(chosen) < target_count:
+            families = {candidate.family for candidate in chosen}
+            next_candidate = min(
+                remaining,
+                key=lambda candidate: (
+                    0
+                    if self._is_stale(candidate.item_name)
+                    and self._has_evidence(candidate, context, require_sustained=True)
+                    else 1,
+                    candidate.family in families,
+                    sum(
+                        candidate.item_name == product
+                        for product in self.recent_products
+                    ),
+                    float(candidate.effective_difficulty or 0.0),
+                    candidate.item_name,
+                ),
+            )
+            chosen.append(next_candidate)
+            remaining.remove(next_candidate)
+        return chosen
 
     def _lane_for(
         self,
@@ -1094,41 +1148,50 @@ class EvidenceDrivenCustomerPolicy:
     ) -> str:
         scheduled = LANE_SCHEDULE[self.completed_epochs % len(LANE_SCHEDULE)]
         if scheduled == "frontier" and self.frontier_failure_streak >= 2:
-            return "replay" if any(
-                self.records.get(c.item_name) and self.records[c.item_name].capacity_evidence
-                for c in candidates
-            ) else "anchor"
+            return (
+                "replay"
+                if any(
+                    self.records.get(c.item_name)
+                    and self.records[c.item_name].capacity_evidence
+                    for c in candidates
+                )
+                else "anchor"
+            )
         return scheduled
 
-    def _recovery_candidates(self, candidates: list[ContractCandidate]) -> list[ContractCandidate]:
+    def _recovery_candidates(
+        self, candidates: list[ContractCandidate]
+    ) -> list[ContractCandidate]:
         result: list[ContractCandidate] = []
         for candidate in candidates:
             record = self.records.get(candidate.item_name)
             if record is None or record.attempts <= 0:
                 continue
-            structural_recovery = (
-                record.capability_progress_count > 0
-                and (
-                    record.last_capability_progress_epoch == record.last_epoch
-                    or (
-                        record.last_capability_progress_epoch == 0
-                        and record.last_epoch == self.completed_epochs
-                    )
+            structural_recovery = record.capability_progress_count > 0 and (
+                record.last_capability_progress_epoch == record.last_epoch
+                or (
+                    record.last_capability_progress_epoch == 0
+                    and record.last_epoch == self.completed_epochs
                 )
             )
-            if structural_recovery and self._recovery_consumed_epochs.get(candidate.item_name) == record.last_epoch:
+            if (
+                structural_recovery
+                and self._recovery_consumed_epochs.get(candidate.item_name)
+                == record.last_epoch
+            ):
                 continue
             if structural_recovery and record.failure_streak > 0:
                 result.append(candidate)
             elif (
                 record.capability_progress_count == 0
-                and
-                record.zero_delivery_count > 0
+                and record.zero_delivery_count > 0
                 and record.last_epoch == self.completed_epochs
                 and record.failure_streak > 0
             ):
                 result.append(candidate)
-        return sorted(result, key=lambda c: (c.item_name, c.effective_difficulty or 0.0))
+        return sorted(
+            result, key=lambda c: (c.item_name, c.effective_difficulty or 0.0)
+        )
 
     def _candidates_for_lane(
         self,
@@ -1152,10 +1215,10 @@ class EvidenceDrivenCustomerPolicy:
         if lane == "replay":
             return self._rotate_recent(
                 [
-                candidate
-                for candidate in candidates
-                if self.records.get(candidate.item_name)
-                and self.records[candidate.item_name].attempts > 0
+                    candidate
+                    for candidate in candidates
+                    if self.records.get(candidate.item_name)
+                    and self.records[candidate.item_name].attempts > 0
                 ]
             )
         if lane == "accel":
@@ -1193,14 +1256,18 @@ class EvidenceDrivenCustomerPolicy:
         ]
         return alternatives or candidates
 
-    def _frontier_step_allowed(self, candidate: ContractCandidate, current_band: int) -> bool:
+    def _frontier_step_allowed(
+        self, candidate: ContractCandidate, current_band: int
+    ) -> bool:
         features = candidate.features
         if features is None:
             return False
         factory_band = getattr(features, "factory_band", None)
         target_band = getattr(features, "target_band", None)
         try:
-            target_band = int(target_band if target_band is not None else features.stage_band)
+            target_band = int(
+                target_band if target_band is not None else features.stage_band
+            )
             # The context is authoritative.  A v1 feature record can carry a
             # default zero factory band even when the frozen context is more
             # advanced, so a stale lower value must not reject a valid local
@@ -1281,7 +1348,9 @@ class EvidenceDrivenCustomerPolicy:
 
         rates = [
             float((getattr(context, "delivery_rates_60s", {}) or {}).get(product, 0.0)),
-            float((getattr(context, "delivery_rates_300s", {}) or {}).get(product, 0.0)),
+            float(
+                (getattr(context, "delivery_rates_300s", {}) or {}).get(product, 0.0)
+            ),
         ]
         telemetry = getattr(context, "delivery_telemetry", None)
         if telemetry is not None:
@@ -1310,13 +1379,17 @@ class EvidenceDrivenCustomerPolicy:
             cls._context_delivery_rate(context, product),
         )
 
-    def _representatives(self, pool: list[ContractCandidate]) -> list[ContractCandidate]:
+    def _representatives(
+        self, pool: list[ContractCandidate]
+    ) -> list[ContractCandidate]:
         by_product: dict[str, ContractCandidate] = {}
         for candidate in pool:
             if not candidate.accepted or candidate.features is None:
                 continue
             current = by_product.get(candidate.item_name)
-            if current is None or self._candidate_key(candidate) < self._candidate_key(current):
+            if current is None or self._candidate_key(candidate) < self._candidate_key(
+                current
+            ):
                 by_product[candidate.item_name] = candidate
         return sorted(by_product.values(), key=lambda candidate: candidate.item_name)
 
@@ -1410,22 +1483,27 @@ class EvidenceDrivenCustomerPolicy:
         if lane == "accel":
             return "accel_stress"
         record = self.records.get(candidate.item_name)
-        context_capacity = max(
-            self._context_production_rate(context, candidate.item_name),
-            self._context_delivery_rate(context, candidate.item_name),
-        ) > EPSILON
+        context_capacity = (
+            max(
+                self._context_production_rate(context, candidate.item_name),
+                self._context_delivery_rate(context, candidate.item_name),
+            )
+            > EPSILON
+        )
         if (record is None or not record.capacity_evidence) and not context_capacity:
             return "commissioning"
         sustained = self._has_automated_capacity(candidate, context)
-        return (
-            "throughput"
-            if sustained and rng.random() < 0.55
-            else "consolidation"
-        )
+        return "throughput" if sustained and rng.random() < 0.55 else "consolidation"
 
     @staticmethod
-    def _allow_mixed(*, lane: str, candidates: list[ContractCandidate], rng: random.Random) -> bool:
-        return lane in {"anchor", "replay"} and len(candidates) >= 2 and rng.random() < 0.25
+    def _allow_mixed(
+        *, lane: str, candidates: list[ContractCandidate], rng: random.Random
+    ) -> bool:
+        return (
+            lane in {"anchor", "replay"}
+            and len(candidates) >= 2
+            and rng.random() < 0.25
+        )
 
     def _secondary_candidate(
         self,
@@ -1434,14 +1512,19 @@ class EvidenceDrivenCustomerPolicy:
         candidates: list[ContractCandidate],
         context: ContractContextSnapshot,
     ) -> ContractCandidate | None:
-        alternatives = [candidate for candidate in candidates if candidate.item_name != primary.item_name]
+        alternatives = [
+            candidate
+            for candidate in candidates
+            if candidate.item_name != primary.item_name
+        ]
         if not alternatives:
             return None
         current_band = self._current_band(context)
         same_band = [
             candidate
             for candidate in alternatives
-            if candidate.features is not None and candidate.features.stage_band <= current_band
+            if candidate.features is not None
+            and candidate.features.stage_band <= current_band
         ]
         return sorted(same_band or alternatives, key=self._candidate_key)[0]
 
@@ -1461,23 +1544,29 @@ class EvidenceDrivenCustomerPolicy:
         intent: str = "deepen",
         utility_components: dict[str, float] | None = None,
     ) -> AdaptiveOrderPlan:
-        line_plans = [self._size_line(candidate, mode, context, catalog, rng) for candidate in chosen]
+        line_plans = [
+            self._size_line(candidate, mode, context, catalog, rng)
+            for candidate in chosen
+        ]
+        # Modes describe selection intent, never a different success
+        # mechanism. Every adaptive plan uses autonomous qualification.
         effective_mode = mode
-        if mode == "throughput" and not all(
-            line_plan[2].get("effective_mode") == "throughput"
-            for line_plan in line_plans
-        ):
-            # Keep direct callers and mixed legacy records from emitting a
-            # sustained order after sizing fell back due to missing
-            # provenance-safe capacity evidence.
-            effective_mode = "consolidation"
         deadline = min(max(plan[1] for plan in line_plans), MAX_SERVICE_DEADLINE_TICKS)
         products = tuple(
-            ProductDemandSpec(product=candidate.item_name, quantity=float(quantity))
-            for candidate, (quantity, _, _) in zip(chosen, line_plans)
+            ProductDemandSpec(
+                product=candidate.item_name,
+                quantity=float(
+                    round_to_batch(
+                        float(evidence["target_rate"]) * deadline / TICKS_PER_MINUTE
+                    )
+                ),
+            )
+            for candidate, (_, _, evidence) in zip(chosen, line_plans)
         )
         line_evaluations: list[tuple[Any, float, float, float, dict[str, Any]]] = []
-        for candidate, product, (quantity, line_deadline, line_evidence) in zip(chosen, products, line_plans):
+        for candidate, product, (quantity, line_deadline, line_evidence) in zip(
+            chosen, products, line_plans
+        ):
             line_features = _features_for(
                 context,
                 candidate.item_name,
@@ -1493,8 +1582,12 @@ class EvidenceDrivenCustomerPolicy:
             line_evidence.update(
                 {
                     "stage_band": line_features.stage_band,
-                    "factory_band": getattr(line_features, "factory_band", self._current_band(context)),
-                    "target_band": getattr(line_features, "target_band", line_features.stage_band),
+                    "factory_band": getattr(
+                        line_features, "factory_band", self._current_band(context)
+                    ),
+                    "target_band": getattr(
+                        line_features, "target_band", line_features.stage_band
+                    ),
                     "line_deadline_ticks": int(line_deadline),
                     "raw_difficulty": raw,
                     "state_advantage": advantage,
@@ -1502,7 +1595,9 @@ class EvidenceDrivenCustomerPolicy:
                     "rating_distance": round(abs(effective - rating.mu), 6),
                 }
             )
-            line_evaluations.append((line_features, raw, advantage, effective, line_evidence))
+            line_evaluations.append(
+                (line_features, raw, advantage, effective, line_evidence)
+            )
 
         primary = chosen[0]
         features = line_evaluations[0][0]
@@ -1510,7 +1605,9 @@ class EvidenceDrivenCustomerPolicy:
         advantage = statistics.fmean(item[2] for item in line_evaluations)
         effective = statistics.fmean(item[3] for item in line_evaluations)
         composition_penalty = 0.6 * (len(products) - 1)
-        service_penalty = 0.4 if effective_mode in {"throughput", "accel_stress"} else 0.0
+        service_penalty = (
+            0.4 if effective_mode in {"throughput", "accel_stress"} else 0.0
+        )
         candidate = primary.model_copy(
             update={
                 "quantity": round(products[0].quantity),
@@ -1521,12 +1618,16 @@ class EvidenceDrivenCustomerPolicy:
                 "features": features,
                 "raw_difficulty": raw + composition_penalty + service_penalty,
                 "state_advantage": advantage,
-                "effective_difficulty": effective + composition_penalty + service_penalty,
+                "effective_difficulty": effective
+                + composition_penalty
+                + service_penalty,
             }
         )
         line_evidence = {
             chosen_candidate.item_name: evidence
-            for chosen_candidate, (_, _, _, _, evidence) in zip(chosen, line_evaluations)
+            for chosen_candidate, (_, _, _, _, evidence) in zip(
+                chosen, line_evaluations
+            )
         }
         mutation = None
         if lane == "accel":
@@ -1565,10 +1666,14 @@ class EvidenceDrivenCustomerPolicy:
                 if self.records.get(primary.item_name) is not None
                 else None
             ),
-            "parent_product_id": primary.item_name if self.records.get(primary.item_name) is not None else None,
+            "parent_product_id": primary.item_name
+            if self.records.get(primary.item_name) is not None
+            else None,
             "rating_before": rating.model_dump(mode="json"),
             "selection_seed": selection_seed,
             "frontier_failure_streak": self.frontier_failure_streak,
+            "success_streak": self.success_streak,
+            "last_contract_was_mixed": self._last_was_mixed,
             "frontier_guard": {
                 "factory_band": self._current_band(context),
                 "max_band_step": FRONTIER_MAX_BAND_STEP,
@@ -1576,29 +1681,33 @@ class EvidenceDrivenCustomerPolicy:
                 or self._frontier_step_allowed(primary, self._current_band(context)),
             },
             "mutation": mutation,
-            "commissioning_probe": effective_mode == "sustained_commissioning",
+            "commissioning_probe": False,
+            "objective_kind": "autonomous_throughput",
             "lines": line_evidence,
             "final_plan": {
                 "raw_difficulty": round(raw + composition_penalty + service_penalty, 6),
                 "state_advantage": round(advantage, 6),
-                "effective_difficulty": round(effective + composition_penalty + service_penalty, 6),
-                "rating_distance": round(abs(effective + composition_penalty + service_penalty - rating.mu), 6),
+                "effective_difficulty": round(
+                    effective + composition_penalty + service_penalty, 6
+                ),
+                "rating_distance": round(
+                    abs(effective + composition_penalty + service_penalty - rating.mu),
+                    6,
+                ),
             },
         }
         return AdaptiveOrderPlan(
             candidate=candidate,
-            order_kind=(
-                "sustained"
-                if effective_mode in {"throughput", "accel_stress", "sustained_commissioning"}
-                else "one_shot"
-            ),
+            order_kind="sustained",
             products=products,
             mode=effective_mode,
             evidence=evidence,
         )
 
     @staticmethod
-    def _accel_mutation(candidate: ContractCandidate, line_evidence: dict[str, Any]) -> dict[str, Any]:
+    def _accel_mutation(
+        candidate: ContractCandidate, line_evidence: dict[str, Any]
+    ) -> dict[str, Any]:
         return {
             "kind": "quantity_multiplier",
             "parent_product": candidate.item_name,
@@ -1629,18 +1738,23 @@ class EvidenceDrivenCustomerPolicy:
                 + 0.25 * record.capability_progress_count
                 + 0.25 * record.failure_streak
                 + 0.20 * (1.0 / math.sqrt(record.attempts + 1))
-                + 0.25 * min(max(self.completed_epochs - record.last_epoch, 0) / 4.0, 1.0),
+                + 0.25
+                * min(max(self.completed_epochs - record.last_epoch, 0) / 4.0, 1.0),
             )
         frontier_penalty = 0.0
         if lane == "frontier":
             frontier_penalty = 0.35 * self.frontier_failure_streak
-            if not self._frontier_step_allowed(plan.candidate, self._current_band(context)):
+            if not self._frontier_step_allowed(
+                plan.candidate, self._current_band(context)
+            ):
                 return -1e9
         if reason == "capability_progress_replay":
             replay_signal += 0.8
         if reason == "zero_delivery_backoff":
             replay_signal += 0.5
-        lane_bonus = {"anchor": 0.20, "replay": 0.55, "frontier": 0.15, "accel": 0.10}[lane]
+        lane_bonus = {"anchor": 0.20, "replay": 0.55, "frontier": 0.15, "accel": 0.10}[
+            lane
+        ]
         recent = sum(
             plan.candidate.item_name == product for product in self.recent_products
         )
@@ -1675,34 +1789,52 @@ class EvidenceDrivenCustomerPolicy:
         production_rate = self._context_production_rate(context, product)
         delivery_rate = self._context_delivery_rate(context, product)
         live_rate = max(production_rate, delivery_rate)
-        has_evidence = bool((record and record.capacity_evidence) or live_rate > EPSILON)
         automated_capacity = bool(
-            (record and record.automated_capacity_evidence)
-            or production_rate > EPSILON
+            (record and record.automated_capacity_evidence) or production_rate > EPSILON
         )
         requested_mode = mode
         depth = max(int(candidate.features.recipe_depth), 1)
-        if not has_evidence:
-            quantity = round_to_batch(max(5.0, 120.0 / (depth * depth)))
-            analytic = analytic_feasibility(catalog, product, quantity, context)
-            setup_minutes = 10.0 + 5.0 * depth + 10.0 * candidate.features.missing_technology_count
+        if not automated_capacity:
+            reference_rate = STAGE_REFERENCE_RATES.get(
+                int(candidate.features.stage_band), 30.0
+            )
+            target_rate = max(
+                0.5,
+                reference_rate * COMMISSIONING_PROBE_RATE_FRACTION / depth,
+            )
+            setup_minutes = (
+                COLD_START_BASE_MINUTES
+                + COLD_START_DEPTH_MINUTES * depth
+                + COLD_START_MISSING_TECH_MINUTES
+                * candidate.features.missing_technology_count
+            )
+            seed_quantity = round_to_batch(target_rate * setup_minutes)
+            analytic = analytic_feasibility(catalog, product, seed_quantity, context)
             deadline = max(
                 int(setup_minutes * TICKS_PER_MINUTE),
                 int(analytic * 1.75),
                 MIN_COMMISSIONING_DEADLINE_TICKS,
             )
             deadline = min(deadline, MAX_COMMISSIONING_DEADLINE_TICKS)
-            return quantity, deadline, {
-                "basis": "commissioning_cold_start",
-                "evidence_kind": "none",
-                "requested_mode": requested_mode,
-                "effective_mode": "commissioning",
-                "automated_capacity_evidence": False,
-                "recipe_depth": depth,
-                "quantity": quantity,
-                "deadline_ticks": deadline,
-                "deadline_bound": MAX_COMMISSIONING_DEADLINE_TICKS,
-            }
+            window_minutes = deadline / TICKS_PER_MINUTE
+            quantity = round_to_batch(target_rate * window_minutes)
+            return (
+                quantity,
+                deadline,
+                {
+                    "basis": "cold_start_autonomous_rate",
+                    "evidence_kind": "none",
+                    "requested_mode": requested_mode,
+                    "effective_mode": "throughput",
+                    "automated_capacity_evidence": False,
+                    "recipe_depth": depth,
+                    "target_rate": round(target_rate, 6),
+                    "window_minutes": round(window_minutes, 6),
+                    "quantity": quantity,
+                    "deadline_ticks": deadline,
+                    "deadline_bound": MAX_COMMISSIONING_DEADLINE_TICKS,
+                },
+            )
 
         if mode == "sustained_commissioning":
             # Do not size this from delivered_rates: those may be manual
@@ -1712,9 +1844,7 @@ class EvidenceDrivenCustomerPolicy:
             )
             target_rate = max(
                 1.0,
-                reference_rate
-                * COMMISSIONING_PROBE_RATE_FRACTION
-                / max(depth, 1),
+                reference_rate * COMMISSIONING_PROBE_RATE_FRACTION / max(depth, 1),
             )
             window = COMMISSIONING_PROBE_WINDOW_MINUTES
             quantity = max(1, round_to_batch(target_rate * window))
@@ -1727,30 +1857,42 @@ class EvidenceDrivenCustomerPolicy:
                 ),
                 MAX_SERVICE_DEADLINE_TICKS,
             )
-            return quantity, deadline, {
-                "basis": "sustained_commissioning_probe",
-                "requested_mode": requested_mode,
-                "effective_mode": "sustained_commissioning",
-                "automated_capacity_evidence": False,
-                "evidence_kind": self._evidence_kind(
-                    record,
-                    live_rate,
-                    delivery_rate=delivery_rate,
-                    production_rate=production_rate,
-                ),
-                "live_production_rate": round(production_rate, 6),
-                "live_delivery_rate": round(delivery_rate, 6),
-                "target_rate": round(target_rate, 6),
-                "window_minutes": window,
-                "quantity": quantity,
-                "deadline_ticks": deadline,
-                "deadline_bound": MAX_SERVICE_DEADLINE_TICKS,
-            }
+            return (
+                quantity,
+                deadline,
+                {
+                    "basis": "sustained_commissioning_probe",
+                    "requested_mode": requested_mode,
+                    "effective_mode": "sustained_commissioning",
+                    "automated_capacity_evidence": False,
+                    "evidence_kind": self._evidence_kind(
+                        record,
+                        live_rate,
+                        delivery_rate=delivery_rate,
+                        production_rate=production_rate,
+                    ),
+                    "live_production_rate": round(production_rate, 6),
+                    "live_delivery_rate": round(delivery_rate, 6),
+                    "target_rate": round(target_rate, 6),
+                    "window_minutes": window,
+                    "quantity": quantity,
+                    "deadline_ticks": deadline,
+                    "deadline_bound": MAX_SERVICE_DEADLINE_TICKS,
+                },
+            )
 
-        rates = list(record.empirical_rates if record else ())
+        # Manual delivery totals are never a throughput baseline. Retain only
+        # autonomous depot windows and provenance-safe automated production.
+        rates = list(record.sustained_window_rates if record else ())
+        if record is not None:
+            rates.extend(record.measured_rates)
         if live_rate > EPSILON:
             rates.append(live_rate)
-        center = statistics.median(rates) if rates else STAGE_REFERENCE_RATES.get(candidate.features.stage_band, 30.0) * 0.25
+        center = (
+            statistics.median(rates)
+            if rates
+            else STAGE_REFERENCE_RATES.get(candidate.features.stage_band, 30.0) * 0.25
+        )
         spread = (
             statistics.pstdev(rates)
             if len(rates) >= 2
@@ -1781,9 +1923,7 @@ class EvidenceDrivenCustomerPolicy:
             )
             lower_confidence_rate = max(
                 throughput_center
-                - 1.28
-                * throughput_spread
-                / math.sqrt(max(len(throughput_rates), 1)),
+                - 1.28 * throughput_spread / math.sqrt(max(len(throughput_rates), 1)),
                 0.0,
             )
             target_rate = max(
@@ -1804,48 +1944,60 @@ class EvidenceDrivenCustomerPolicy:
         else:
             window = rng.uniform(20.0, 45.0)
             exploration = max(spread * 0.20, center * 0.03)
-            target_rate = max((center * (0.65 + 0.25 * completion) + exploration) * backoff, 1.0)
+            target_rate = max(
+                (center * (0.65 + 0.25 * completion) + exploration) * backoff, 1.0
+            )
             conservative_rate = max(min(rates) if rates else center * 0.5, 1.0)
-            deadline = int((target_rate * window / conservative_rate) * TICKS_PER_MINUTE * 1.15)
+            deadline = int(
+                (target_rate * window / conservative_rate) * TICKS_PER_MINUTE * 1.15
+            )
             basis = "empirical_capacity_consolidation"
 
         quantity = round_to_batch(target_rate * window)
         analytic = analytic_feasibility(catalog, product, quantity, context)
         if mode != "throughput":
             deadline = max(deadline, int(analytic * 1.25))
-        deadline = min(max(deadline, MIN_SERVICE_DEADLINE_TICKS), MAX_SERVICE_DEADLINE_TICKS)
+        deadline = min(
+            max(deadline, MIN_SERVICE_DEADLINE_TICKS), MAX_SERVICE_DEADLINE_TICKS
+        )
         if record is not None and record.last_quantity > 0 and failure_streak > 0:
-            quantity = max(1, min(quantity, round_to_batch(record.last_quantity * 0.85)))
-        return quantity, deadline, {
-            "basis": basis,
-            "requested_mode": requested_mode,
-            "effective_mode": mode,
-            "automated_capacity_evidence": automated_capacity,
-            "evidence_kind": self._evidence_kind(
-                record,
-                live_rate,
-                delivery_rate=delivery_rate,
-                production_rate=production_rate,
-            ),
-            "live_production_rate": round(production_rate, 6),
-            "live_delivery_rate": round(delivery_rate, 6),
-            "observed_rate_center": round(center, 6),
-            "observed_rate_spread": round(spread, 6),
-            "completion_mean": round(completion, 6),
-            "failure_streak": failure_streak,
-            "target_rate": round(target_rate, 6),
-            "depot_rate_lcb": round(lower_confidence_rate, 6)
-            if basis
-            in {
-                "sustained_depot_throughput_lcb",
-                "automated_production_throughput_lcb",
-            }
-            else None,
-            "window_minutes": round(window, 6),
-            "quantity": quantity,
-            "deadline_ticks": deadline,
-            "deadline_bound": MAX_SERVICE_DEADLINE_TICKS,
-        }
+            quantity = max(
+                1, min(quantity, round_to_batch(record.last_quantity * 0.85))
+            )
+        return (
+            quantity,
+            deadline,
+            {
+                "basis": basis,
+                "requested_mode": requested_mode,
+                "effective_mode": mode,
+                "automated_capacity_evidence": automated_capacity,
+                "evidence_kind": self._evidence_kind(
+                    record,
+                    live_rate,
+                    delivery_rate=delivery_rate,
+                    production_rate=production_rate,
+                ),
+                "live_production_rate": round(production_rate, 6),
+                "live_delivery_rate": round(delivery_rate, 6),
+                "observed_rate_center": round(center, 6),
+                "observed_rate_spread": round(spread, 6),
+                "completion_mean": round(completion, 6),
+                "failure_streak": failure_streak,
+                "target_rate": round(target_rate, 6),
+                "depot_rate_lcb": round(lower_confidence_rate, 6)
+                if basis
+                in {
+                    "sustained_depot_throughput_lcb",
+                    "automated_production_throughput_lcb",
+                }
+                else None,
+                "window_minutes": round(window, 6),
+                "quantity": quantity,
+                "deadline_ticks": deadline,
+                "deadline_bound": MAX_SERVICE_DEADLINE_TICKS,
+            },
+        )
 
     @staticmethod
     def _evidence_kind(
@@ -1860,9 +2012,8 @@ class EvidenceDrivenCustomerPolicy:
         if delivery_rate > EPSILON:
             return "observed_depot_delivery"
         if (
-            (production_rate if production_rate is not None else live_rate) > EPSILON
-            or (record is not None and record.observed_production)
-        ):
+            production_rate if production_rate is not None else live_rate
+        ) > EPSILON or (record is not None and record.observed_production):
             return "observed_production"
         if record is not None and record.positive_delivery:
             return "positive_delivery"

@@ -13,7 +13,7 @@ RUN pip install --no-cache-dir build \
 # =============================================================================
 # Stage 2: Runtime image based on Factorio server
 # =============================================================================
-FROM factoriotools/factorio:2.0.73
+FROM factoriotools/factorio:2.0.77
 
 USER root
 

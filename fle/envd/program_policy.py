@@ -65,7 +65,10 @@ FORBIDDEN_NODE_TYPES = (
 )
 
 
-def validate_program(code: str) -> None:
+PLANNER_ASSISTED_ACTIONS = {"connect_entities", "nearest_buildable"}
+
+
+def validate_program(code: str, *, action_profile: str = "semantic-motor-v1") -> None:
     """Reject host access, reflection, and pathological program structure."""
 
     if len(code.encode("utf-8")) > MAX_PROGRAM_BYTES:
@@ -83,6 +86,19 @@ def validate_program(code: str) -> None:
             f"program exceeds the {MAX_AST_NODES}-node action-profile limit"
         )
 
+    semantic_aliases: dict[str, str] = {}
+    if action_profile == "semantic-motor-v1":
+        for node in nodes:
+            if (
+                isinstance(node, ast.Assign)
+                and isinstance(node.value, ast.Name)
+                and node.value.id
+                in {*PLANNER_ASSISTED_ACTIONS, "place_entity", "move_to"}
+            ):
+                for target in node.targets:
+                    if isinstance(target, ast.Name):
+                        semantic_aliases[target.id] = node.value.id
+
     for node in nodes:
         if isinstance(node, FORBIDDEN_NODE_TYPES):
             raise ProgramPolicyViolation(
@@ -93,6 +109,14 @@ def validate_program(code: str) -> None:
         ):
             raise ProgramPolicyViolation(
                 f"name {node.id!r} is not available in fle-program-v1"
+            )
+        if (
+            action_profile == "semantic-motor-v1"
+            and isinstance(node, ast.Name)
+            and node.id in PLANNER_ASSISTED_ACTIONS
+        ):
+            raise ProgramPolicyViolation(
+                f"{node.id} is available only in planner-assisted-v1"
             )
         if isinstance(node, ast.Attribute) and node.attr.startswith("_"):
             raise ProgramPolicyViolation(
@@ -117,6 +141,45 @@ def validate_program(code: str) -> None:
                     f"imports are restricted by fle-program-v1; rejected: {names}"
                 )
         if isinstance(node, ast.Call) and isinstance(node.func, ast.Name):
+            called_name = semantic_aliases.get(node.func.id, node.func.id)
+            if (
+                action_profile == "semantic-motor-v1"
+                and called_name in PLANNER_ASSISTED_ACTIONS
+            ):
+                raise ProgramPolicyViolation(
+                    f"{called_name} is available only in planner-assisted-v1"
+                )
+            if action_profile == "semantic-motor-v1" and called_name == "move_to":
+                if any(
+                    keyword.arg in {"laying", "leading"} for keyword in node.keywords
+                ):
+                    raise ProgramPolicyViolation(
+                        "move_to laying/leading is planner-assisted; use place_path"
+                    )
+            if action_profile == "semantic-motor-v1" and called_name == "place_entity":
+                first_argument = node.args[0] if node.args else None
+                if (
+                    isinstance(first_argument, ast.Attribute)
+                    and isinstance(first_argument.value, ast.Name)
+                    and first_argument.value.id == "Prototype"
+                    and first_argument.attr == "OffshorePump"
+                ):
+                    raise ProgramPolicyViolation(
+                        "use place_offshore_pump for explicit shoreline snapping"
+                    )
+                exact_argument = None
+                if len(node.args) >= 4:
+                    exact_argument = node.args[3]
+                for keyword in node.keywords:
+                    if keyword.arg == "exact":
+                        exact_argument = keyword.value
+                if (
+                    isinstance(exact_argument, ast.Constant)
+                    and exact_argument.value is False
+                ):
+                    raise ProgramPolicyViolation(
+                        "non-exact placement is planner-assisted; canonical placement is exact"
+                    )
             if node.func.id != "set_entity_recipe":
                 continue
             recipe_argument = node.args[1] if len(node.args) > 1 else None

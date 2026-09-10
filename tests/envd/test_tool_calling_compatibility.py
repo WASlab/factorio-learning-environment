@@ -13,7 +13,7 @@ import aiohttp
 import pytest
 
 from fle.envd.client import HTTPEnvironmentClient
-from fle.envd.program_policy import validate_program
+from fle.envd.program_policy import ProgramPolicyViolation, validate_program
 from fle.envd.service import EnvironmentService
 from fle.envd.models import FactorioTaskSpec
 from fle.eval.remote_agent import _skipped_tool_result
@@ -72,6 +72,28 @@ def test_programmatic_composition_is_one_validated_intervention(task_spec):
     assert result.event.error is False
 
 
+@pytest.mark.parametrize(
+    "code",
+    [
+        "connect_entities(a, b, Prototype.TransportBelt)",
+        "nearest_buildable(Prototype.StoneFurnace)",
+        "move_to(p, laying=Prototype.TransportBelt)",
+        "place_entity(Prototype.StoneFurnace, position=p, exact=False)",
+        "place_entity(Prototype.OffshorePump, position=p)",
+    ],
+)
+def test_semantic_motor_profile_rejects_planner_assistance(code):
+    with pytest.raises(ProgramPolicyViolation):
+        validate_program(code)
+
+
+def test_planner_assisted_ablation_keeps_legacy_router():
+    validate_program(
+        "connect_entities(a, b, Prototype.TransportBelt)",
+        action_profile="planner-assisted-v1",
+    )
+
+
 def test_http_client_retries_only_keyed_ambiguous_execute():
     client = HTTPEnvironmentClient("http://envd.invalid")
     calls = []
@@ -110,6 +132,7 @@ def test_http_client_retries_only_keyed_ambiguous_execute():
 
 
 def test_mcp_advertises_tool_annotations_and_structured_results(monkeypatch):
+    monkeypatch.setattr(factorio_codex_mcp, "_camera_call", lambda: {"enabled": False})
     tools = {tool["name"]: tool for tool in factorio_codex_mcp.TOOLS}
     observe = tools["factorio_observe_factory"]
     execute = tools["factorio_execute_program"]
@@ -134,13 +157,9 @@ def test_mcp_advertises_tool_annotations_and_structured_results(monkeypatch):
         sys,
         "stdin",
         io.StringIO(
-            json.dumps(
-                {"jsonrpc": "2.0", "id": "observe-1", "method": "initialize"}
-            )
+            json.dumps({"jsonrpc": "2.0", "id": "observe-1", "method": "initialize"})
             + "\n"
-            + json.dumps(
-                {"jsonrpc": "2.0", "id": "tools-1", "method": "tools/list"}
-            )
+            + json.dumps({"jsonrpc": "2.0", "id": "tools-1", "method": "tools/list"})
             + "\n"
             + json.dumps(
                 {

@@ -1,4 +1,3 @@
-from time import sleep
 import threading
 
 from fle.env.tools import Tool
@@ -34,20 +33,11 @@ class Sleep(Tool):
         :param seconds: Number of seconds to sleep.
         :return: True if sleep was successful.
         """
-        # Track elapsed ticks for appropriate sleep calculation
-        ticks_before = self.game_state.instance.get_elapsed_ticks()
+        if seconds <= 0 or seconds > 15:
+            raise ValueError("seconds must be between 1 and 15")
+        from fle.env.tools.agent.wait.client import Wait
 
-        # Update elapsed ticks on server
-        _, _ = self.execute(seconds)
-
-        # Sleep for the appropriate real-world time based on elapsed ticks
-        ticks_after = self.game_state.instance.get_elapsed_ticks()
-        ticks_added = ticks_after - ticks_before
-        if ticks_added > 0:
-            game_speed = self.game_state.instance.get_speed()
-            real_world_sleep = ticks_added / 60 / game_speed if game_speed > 0 else 0
-            sleep(real_world_sleep)
-            # Track the accumulated sleep duration for this step
-            Sleep._add_sleep_duration(real_world_sleep)
-
+        started = __import__("time").monotonic()
+        Wait(self.connection, self.game_state)(int(seconds * 60))
+        Sleep._add_sleep_duration(__import__("time").monotonic() - started)
         return True

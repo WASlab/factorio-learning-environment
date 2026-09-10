@@ -28,9 +28,9 @@ class FactorioTaskData(vf.TaskData):
     task_id: str
     seed: int = 0
     scenario: str = "default_lab_scenario"
-    factorio_version: str = "2.0.73"
+    factorio_version: str = "2.0.77"
     checkpoint_id: str = "scenario:default_lab_scenario"
-    action_profile: str = "fle-program-v1"
+    action_profile: str = "semantic-motor-v1"
     max_interventions: int = 8
     holdout_seconds: int = 60
     task_spec: FactorioTaskSpec | None = None
@@ -198,9 +198,9 @@ class FactorioTasksetConfig(vf.TasksetConfig):
     task_specs: list[FactorioTaskSpec] = Field(default_factory=list)
     seed: int = 0
     scenario: str = "default_lab_scenario"
-    factorio_version: str = "2.0.73"
+    factorio_version: str = "2.0.77"
     checkpoint_id: str = "scenario:default_lab_scenario"
-    action_profile: str = "fle-program-v1"
+    action_profile: str = "semantic-motor-v1"
     max_interventions: int = 8
     holdout_seconds: int = 60
     task: FactorioTaskConfig = FactorioTaskConfig()
@@ -224,8 +224,7 @@ class FactorioTaskset(vf.Taskset[FactorioTask, FactorioTasksetConfig]):
         if requested_suites and not benchmark_specs:
             known_suites = ", ".join(sorted({item.suite for item in catalog}))
             raise ValueError(
-                "Benchmark selection matched no tasks; "
-                f"known suites: {known_suites}"
+                f"Benchmark selection matched no tasks; known suites: {known_suites}"
             )
         specs.extend(benchmark_specs)
         specs = list({spec.task_id: spec for spec in specs}.values())

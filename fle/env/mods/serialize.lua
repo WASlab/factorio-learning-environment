@@ -621,6 +621,8 @@ storage.utils.serialize_entity = function(entity)
     if not entity.valid then
         error("Cannot serialize entity: LuaEntity is no longer valid (entity may have been destroyed or removed)")
     end
+    storage.entity_handles = storage.entity_handles or {}
+    if entity.unit_number then storage.entity_handles[entity.unit_number] = entity end
     if storage.utils.track_public_status then storage.utils.track_public_status(entity) end
     --game.print("Serializing entity: " .. entity.name .. " with direction: " .. entity.direction)
     local direction = entity.direction
@@ -644,6 +646,7 @@ storage.utils.serialize_entity = function(entity)
     end
     
     local serialized = {
+        id = entity.unit_number,
         name = "\""..entity.name.."\"",
         position = entity.position,
         direction = direction,

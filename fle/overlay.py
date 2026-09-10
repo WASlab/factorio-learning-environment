@@ -971,7 +971,11 @@ class FactorioControlPanel:
         try:
             # Use zoom_to_world to focus on agent character
             # camera_cmd = f"/sc if game.players[1] and storage.agent_characters and storage.agent_characters[1] then game.players[1].zoom_to_world(storage.agent_characters[1].position, {self.camera_zoom_scale}, storage.agent_characters[1]) end"
-            camera_cmd = "/sc if game.players[1] and storage.agent_characters and storage.agent_characters[1] then game.players[1].teleport(storage.agent_characters[1].position) end"
+            camera_cmd = (
+                "/sc if remote.interfaces['fle_runtime'] then "
+                "remote.call('fle_runtime', 'dispatch', '__follow_agent', "
+                "game.players[1] and game.players[1].name or '') end"
+            )
             self.rcon_client.send_command(camera_cmd)
             logger.debug("Camera viewport updated to follow agent character")
 

@@ -30,6 +30,7 @@ class ExtractItem(Tool):
             source_name = source.name
 
         name, _ = entity.value
+        self.ensure_reachable(source)
 
         response, elapsed = self.execute(
             self.player_index, name, quantity, x, y, source_name

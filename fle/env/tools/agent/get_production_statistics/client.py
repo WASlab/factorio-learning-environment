@@ -31,8 +31,9 @@ class GetProductionStatistics(Tool):
         )
         if not isinstance(response, dict) or response.get("error"):
             raise RuntimeError(f"Production statistics unavailable: {response}")
-        entries = response.get("entries", [])
-        if isinstance(entries, dict):
-            entries = [entries[key] for key in sorted(entries, key=int)]
-        response["entries"] = entries
+        for field in ("entries", "unknown_products"):
+            entries = response.get(field, [])
+            if isinstance(entries, dict):
+                entries = [entries[key] for key in sorted(entries, key=int)]
+            response[field] = entries
         return response

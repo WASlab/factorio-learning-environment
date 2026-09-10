@@ -67,14 +67,11 @@ def _sustained_service_details(
             slice_len = max(slice_end - slice_start, 0)
             if slice_len <= 0:
                 continue
-            requested = (
-                ((index + 1) * quantity) // window_count
-                - (index * quantity) // window_count
-            )
+            requested = ((index + 1) * quantity) // window_count - (
+                index * quantity
+            ) // window_count
             delivered = sum(
-                amount
-                for tick, amount in credits
-                if slice_start <= tick < slice_end
+                amount for tick, amount in credits if slice_start <= tick < slice_end
             )
             ratio = min(delivered / max(requested, 1e-9), 1.0)
             slice_scores.append(round(ratio, 6))
@@ -802,7 +799,14 @@ class ActiveOrder:
             raise ValueError("requested_quantity must be positive")
         if deadline_ticks <= 0:
             raise ValueError("deadline_ticks must be positive")
-        lines = tuple(products or (ProductDemandSpec(product=item_name, quantity=float(requested_quantity)),))
+        lines = tuple(
+            products
+            or (
+                ProductDemandSpec(
+                    product=item_name, quantity=float(requested_quantity)
+                ),
+            )
+        )
         if len(lines) != len({line.product for line in lines}):
             raise ValueError("adaptive order products must be unique")
         if order_kind not in {"one_shot", "sustained"}:
@@ -824,6 +828,64 @@ class ActiveOrder:
         self._terminal_tick: int | None = None
         self._now: int | None = None
         self._qualification: dict[str, Any] | None = None
+
+    def export_state(self) -> dict[str, Any]:
+        return {
+            "item_name": self.item_name,
+            "requested_quantity": self.requested_quantity,
+            "order_kind": self.order_kind,
+            "products": [line.model_dump(mode="json") for line in self.products],
+            "deadline_ticks": self.deadline_ticks,
+            "activation_tick": self._activation_tick,
+            "delivered": dict(self._delivered),
+            "unattributed": dict(self._unattributed),
+            "credits": {
+                product: [[tick, amount] for tick, amount in credits]
+                for product, credits in self._credits.items()
+            },
+            "first_delivery_tick": self._first_delivery_tick,
+            "completion_tick": self._completion_tick,
+            "status": self._status,
+            "terminal_tick": self._terminal_tick,
+            "now": self._now,
+            "qualification": self._qualification,
+        }
+
+    @classmethod
+    def from_state(cls, state: dict[str, Any]) -> "ActiveOrder":
+        order = cls(
+            item_name=str(state["item_name"]),
+            requested_quantity=int(state["requested_quantity"]),
+            deadline_ticks=int(state["deadline_ticks"]),
+            activation_tick=int(state["activation_tick"]),
+            products=[
+                ProductDemandSpec.model_validate(line)
+                for line in state.get("products", [])
+            ],
+            order_kind=str(state.get("order_kind", "one_shot")),
+        )
+        order._delivered = {
+            str(key): float(value)
+            for key, value in dict(state.get("delivered") or {}).items()
+        }
+        order._unattributed = {
+            str(key): float(value)
+            for key, value in dict(state.get("unattributed") or {}).items()
+        }
+        order._credits = {
+            str(product): [(int(tick), float(amount)) for tick, amount in credits]
+            for product, credits in dict(state.get("credits") or {}).items()
+        }
+        order._first_delivery_tick = state.get("first_delivery_tick")
+        order._completion_tick = state.get("completion_tick")
+        order._status = str(state.get("status", "open"))
+        order._terminal_tick = state.get("terminal_tick")
+        order._now = state.get("now")
+        qualification = state.get("qualification")
+        order._qualification = (
+            dict(qualification) if isinstance(qualification, dict) else None
+        )
+        return order
 
     # -- clock ---------------------------------------------------------------
 
@@ -858,11 +920,20 @@ class ActiveOrder:
             self._terminal_tick = self._activation_tick + self.deadline_ticks
             if complete and self._completion_tick is None:
                 self._completion_tick = self._terminal_tick
+            view = self.student_view()
             return {
                 "event": ("contract_fulfilled" if complete else "contract_expired"),
                 "item": self.item_name,
                 "products": [line.product for line in self.products],
                 "tick": self._terminal_tick,
+                "status": view.status,
+                "requested": {
+                    line.product: round(float(line.quantity), 4)
+                    for line in self.products
+                },
+                "delivered": dict(view.fulfilled),
+                "remaining": dict(view.remaining),
+                "completion_ratio": view.completion_ratio,
             }
         return None
 
@@ -883,11 +954,16 @@ class ActiveOrder:
         # The order closes at its deadline.  Buckets are attributed at their
         # end tick, so a bucket that closes on/after the due boundary is late
         # even if it was opened while the order was active.
-        if tick < self._activation_tick or tick >= self._activation_tick + self.deadline_ticks:
+        if (
+            tick < self._activation_tick
+            or tick >= self._activation_tick + self.deadline_ticks
+        ):
             self._unattributed[product] += amount
             return None
         self._now = max(self._now or self._activation_tick, tick)
-        requested = next(line.quantity for line in self.products if line.product == product)
+        requested = next(
+            line.quantity for line in self.products if line.product == product
+        )
         capacity = max(requested - self._delivered[product], 0.0)
         credit = amount if self.order_kind == "sustained" else min(capacity, amount)
         overflow = amount - credit
@@ -958,9 +1034,7 @@ class ActiveOrder:
             line_service = service[line.product]
             lines[line.product] = {
                 "requested": float(line.quantity),
-                "accepted": round(
-                    min(self._delivered[line.product], line.quantity), 6
-                ),
+                "accepted": round(min(self._delivered[line.product], line.quantity), 6),
                 "raw_bucket_count": len(active_buckets),
                 "raw_bucket_coverage_ratio": round(
                     len(active_buckets) / bucket_count, 6
@@ -1024,14 +1098,28 @@ class ActiveOrder:
 
     def student_view(self) -> OpenContractView:
         """Student-visible projection: no difficulty or rating internals."""
+        completion_ratio = round(self._completion_ratio(), 6)
         return OpenContractView(
             order_id="epoch-order",
             kind=self.order_kind,
             products=list(self.products),
+            target_rate_per_minute={
+                line.product: round(
+                    float(line.quantity) / max(self.deadline_ticks / 3600.0, 1e-9),
+                    6,
+                )
+                for line in self.products
+            },
             issued_at_tick=self._activation_tick,
             due_tick=self._activation_tick + self.deadline_ticks,
             grace_ticks=0,
-            completion_ratio=round(self._completion_ratio(), 6),
+            completion_ratio=completion_ratio,
+            service_completion_ratio=(
+                completion_ratio if self.order_kind == "sustained" else None
+            ),
+            throughput_certified=(
+                self.order_kind == "sustained" and self._qualification is not None
+            ),
             status=(
                 "fulfilled"
                 if self._status == "fulfilled"

@@ -6,6 +6,7 @@ outcome mapping, TrueSkill updates, atomic persistence, and the stopping
 rule -- without any HTTP or Factorio dependency.
 """
 
+import asyncio
 import json
 from types import SimpleNamespace
 
@@ -37,8 +38,10 @@ from scripts.adaptive_contract_benchmark import (  # noqa: E402
     ScriptedAgentSession,
     _atomic_json,
     _load_recipe_dump,
+    _parse_opencode_provider_error,
     _persist_active_interruption,
     _refresh_coverage_obligations,
+    _selection_seed,
     build_candidate_pool,
     build_progress_report,
     default_adaptive_run_id,
@@ -46,9 +49,7 @@ from scripts.adaptive_contract_benchmark import (  # noqa: E402
     render_order_prompt,
     run_session,
     stopping_rule_met,
-    _selection_seed,
 )
-
 
 RECIPES = [
     {
@@ -78,7 +79,7 @@ def _context(epoch_index: int = 0):
         session_id="s",
         epoch_index=epoch_index,
         captured_tick=1000 * epoch_index,
-        technology_ids=("electricity",),
+        technology_ids=("steam-power",),
         unlocked_recipe_ids=(),
         inventory_counts={},
         placed_entity_counts={"stone-furnace": 4},
@@ -239,29 +240,53 @@ def test_progress_report_is_observed_only_and_portfolio_serializable():
         newly_producing=("iron-plate",),
     )
     spec = ContractEpochSpec.create(
-        session_id="s", epoch_index=1, template_id="test",
-        generation_seed=1, selection_seed=2, item_name="iron-plate",
-        quantity=60, order_kind="sustained", deadline_ticks=3600,
+        session_id="s",
+        epoch_index=1,
+        template_id="test",
+        generation_seed=1,
+        selection_seed=2,
+        item_name="iron-plate",
+        quantity=60,
+        order_kind="sustained",
+        deadline_ticks=3600,
         context=_context(1),
         features=ContractDifficultyFeatures(
-            product_id="iron-plate", product_tier=0, recipe_depth=1,
-            missing_technology_count=0, missing_machine_type_count=0,
-            required_new_intermediate_count=0, log_quantity=4.0,
-            deadline_ticks=3600, required_rate_per_minute=60,
-            existing_rate_per_minute=0, inventory_coverage_ratio=0,
-            estimated_power_fraction=0, transport_complexity=0,
+            product_id="iron-plate",
+            product_tier=0,
+            recipe_depth=1,
+            missing_technology_count=0,
+            missing_machine_type_count=0,
+            required_new_intermediate_count=0,
+            log_quantity=4.0,
+            deadline_ticks=3600,
+            required_rate_per_minute=60,
+            existing_rate_per_minute=0,
+            inventory_coverage_ratio=0,
+            estimated_power_fraction=0,
+            transport_complexity=0,
             stage_band=0,
         ),
-        raw_difficulty=1.0, state_advantage=0.0, effective_difficulty=1.0,
+        raw_difficulty=1.0,
+        state_advantage=0.0,
+        effective_difficulty=1.0,
     )
     outcome = ContractEpochOutcome(
-        session_id="s", epoch_index=1, commitment_hash=spec.commitment_hash,
-        status="fulfilled", delivered_quantity=60, requested_quantity=60,
+        session_id="s",
+        epoch_index=1,
+        commitment_hash=spec.commitment_hash,
+        status="fulfilled",
+        delivered_quantity=60,
+        requested_quantity=60,
         delivered_by_product={"iron-plate": 60},
-        requested_by_product={"iron-plate": 60}, completion_ratio=1.0,
-        performance_score=1.0, simulation_ticks_used=3600,
-        interventions_used=3, model_seconds=1, tool_seconds=0,
-        runner_wall_seconds=1, terminal_state_digest="after",
+        requested_by_product={"iron-plate": 60},
+        completion_ratio=1.0,
+        performance_score=1.0,
+        simulation_ticks_used=3600,
+        interventions_used=3,
+        model_seconds=1,
+        tool_seconds=0,
+        runner_wall_seconds=1,
+        terminal_state_digest="after",
         capability_delta=delta,
     )
     epoch = SimpleNamespace(
@@ -276,9 +301,9 @@ def test_progress_report_is_observed_only_and_portfolio_serializable():
     assert vector["evidence_status"] == "observed_only"
     assert vector["structural_delta_summary"]["meaningful_progress_epochs"] == 1
     assert vector["structural_delta_summary"]["path_nodes_crossed"] == 2
-    assert vector["sustainable_capability_count"] == 1
+    assert vector["sustainable_capability_count"] == 0
     assert vector["certified_capability_count"] == 0
-    assert portfolio[0]["status"] == "observed_sustained"
+    assert portfolio[0]["status"] == "commissioned"
     json.dumps(vector)
     json.dumps(portfolio)
 
@@ -303,8 +328,94 @@ def test_opencode_session_writes_isolated_factorio_config(tmp_path):
         }
         factorio = config["mcp"]["factorio"]
         assert factorio["environment"]["LEASE_ID"] == "lease-test"
+        assert factorio["environment"]["MCP_TERMINAL_FINALIZATION_FILE"].endswith(
+            "epoch-terminal-finalization.lock"
+        )
         assert factorio["command"][1].endswith("factorio_codex_mcp.py")
         assert session.variant == "xhigh"
+    finally:
+        session._scratch.cleanup()
+
+
+def test_opencode_terminal_memory_finalization_is_bounded_and_same_session(
+    tmp_path, monkeypatch
+):
+    import asyncio
+
+    session = OpenCodePersistentAgentSession(
+        envd_url="http://127.0.0.1:8172",
+        lease_id="lease-test",
+        model="opencode/muse-spark-1.2-contributor-free",
+        reasoning="max",
+        timeout_seconds=600,
+        artifacts_dir=tmp_path / "artifacts",
+        command=sys.executable,
+        memory_enabled=True,
+    )
+    session.session_id = "ses_memory"
+    calls = []
+
+    def invoke(prompt, *, timeout_seconds=None):
+        calls.append(
+            (prompt, timeout_seconds, session.terminal_finalization_file.exists())
+        )
+        return SimpleNamespace(
+            returncode=0,
+            stdout=_step_finish("ses_memory", "stop"),
+            stderr="",
+            timed_out=False,
+        )
+
+    monkeypatch.setattr(session, "_invoke", invoke)
+    terminal = {
+        "reason": "contract_expired",
+        "payload": {
+            "events": [
+                {
+                    "kind": "contract_expired",
+                    "tick": 120,
+                    "payload": {
+                        "status": "expired",
+                        "requested": {"iron-plate": 10},
+                        "delivered": {"iron-plate": 4},
+                        "remaining": {"iron-plate": 6},
+                        "completion_ratio": 0.4,
+                    },
+                }
+            ]
+        },
+    }
+
+    try:
+        text, record = asyncio.run(
+            session._finalize_terminal_memory(
+                terminal_payload=terminal,
+                epoch_number=3,
+            )
+        )
+        assert record["attempted"] is True
+        assert record["completed"] is True
+        assert calls[0][1] == 300.0
+        assert calls[0][2] is True
+        assert '"completion_ratio":0.4' in calls[0][0]
+        assert "ses_memory" in text
+        assert not session.terminal_finalization_file.exists()
+    finally:
+        asyncio.run(session.close())
+
+
+def test_opencode_session_preserves_glm_max_variant(tmp_path):
+    session = OpenCodePersistentAgentSession(
+        envd_url="http://127.0.0.1:8172",
+        lease_id="lease-test",
+        model="opencode-go/glm-5.3-flash",
+        reasoning="max",
+        timeout_seconds=60,
+        artifacts_dir=tmp_path / "artifacts",
+        command=sys.executable,
+    )
+    try:
+        assert session.variant == "max"
     finally:
         session._scratch.cleanup()
 
@@ -314,20 +425,47 @@ def test_opencode_session_id_parses_json_event_stream():
     assert OpenCodePersistentAgentSession._parse_session_id(output) == "ses_123"
 
 
+def test_opencode_structured_provider_error_parser():
+    output = json.dumps(
+        {
+            "type": "error",
+            "error": {
+                "name": "APIError",
+                "data": {
+                    "message": "Rate limit exceeded",
+                    "statusCode": 429,
+                    "isRetryable": True,
+                },
+            },
+        }
+    )
+    assert _parse_opencode_provider_error(output) == {
+        "name": "APIError",
+        "message": "Rate limit exceeded",
+        "status_code": 429,
+        "retryable": True,
+    }
+
+
 def test_default_adaptive_run_id_is_date_first_readable_and_collision_safe():
     from datetime import datetime, timezone
 
     now = datetime(2026, 8, 27, 20, 31, 50, tzinfo=timezone.utc)
-    assert default_adaptive_run_id(
-        "opencode/muse-spark-1.2-contributor-free", "opencode", now=now
-    ) == "08-27-2026-Muse-Spark-1.2-OpenCode"
-    assert default_adaptive_run_id(
-        "provider/model:v1", "hermes", now=now, collision=True
-    ) == "08-27-2026-Model-V1-Hermes-20-31-50"
+    assert (
+        default_adaptive_run_id(
+            "opencode/muse-spark-1.2-contributor-free", "opencode", now=now
+        )
+        == "08-27-2026-Muse-Spark-1.2-OpenCode"
+    )
+    assert (
+        default_adaptive_run_id("provider/model:v1", "hermes", now=now, collision=True)
+        == "08-27-2026-Model-V1-Hermes-20-31-50"
+    )
 
 
 def test_opencode_retries_rate_limit_before_world_mutation(tmp_path, monkeypatch):
     import asyncio
+
     import scripts.adaptive_contract_benchmark as adaptive_runner
 
     session = OpenCodePersistentAgentSession(
@@ -381,6 +519,81 @@ def test_opencode_retries_rate_limit_before_world_mutation(tmp_path, monkeypatch
         assert session.session_id == "ses_retry"
         assert telemetry.transport_errors == 0
         assert "provider retry" in artifact
+    finally:
+        asyncio.run(session.close())
+
+
+def test_opencode_resumes_same_session_after_retryable_error_with_world_mutation(
+    tmp_path, monkeypatch
+):
+    import asyncio
+
+    import scripts.adaptive_contract_benchmark as adaptive_runner
+
+    session = _fake_opencode_session(tmp_path, api_max_retries=1)
+    rate_limit = "\n".join(
+        [
+            json.dumps({"type": "step_start", "sessionID": "ses_resume"}),
+            json.dumps(
+                {
+                    "type": "error",
+                    "sessionID": "ses_resume",
+                    "error": {
+                        "name": "APIError",
+                        "data": {
+                            "message": "Rate limit exceeded",
+                            "statusCode": 429,
+                            "isRetryable": True,
+                        },
+                    },
+                }
+            ),
+        ]
+    )
+    invocations = [
+        SimpleNamespace(returncode=1, stdout=rate_limit, stderr="", timed_out=False),
+        SimpleNamespace(
+            returncode=0,
+            stdout=_step_finish("ses_resume", "stop"),
+            stderr="",
+            timed_out=False,
+        ),
+    ]
+    calls = []
+
+    def invoke(prompt):
+        calls.append((prompt, session.session_id))
+        if len(calls) == 1:
+            session.trace_file.write_text("tools/call\n", encoding="utf-8")
+        else:
+            session.terminal_file.write_text(
+                json.dumps({"reason": "contract_fulfilled"}), encoding="utf-8"
+            )
+        return invocations.pop(0)
+
+    real_sleep = asyncio.sleep
+
+    async def immediate_sleep(_delay):
+        await real_sleep(0)
+
+    monkeypatch.setattr(session, "_invoke", invoke)
+    monkeypatch.setattr(adaptive_runner.asyncio, "sleep", immediate_sleep)
+    try:
+        telemetry = asyncio.run(session.run_epoch("original order"))
+        assert calls[0] == ("original order", None)
+        assert calls[1][1] == "ses_resume"
+        assert "Do not replay earlier actions" in calls[1][0]
+        assert calls[1][0] != "original order"
+        assert telemetry.transport_errors == 0
+        assert telemetry.invocations == 2
+        audit = json.loads(
+            (tmp_path / "artifacts" / "epoch-0001.opencode.audit.json").read_text()
+        )
+        assert audit["invocations"][0]["world_calls_started"] is True
+        assert (
+            audit["invocations"][0]["action"] == "provider_resume_after_retryable_error"
+        )
+        assert audit["invocations"][0]["provider_error"]["status_code"] == 429
     finally:
         asyncio.run(session.close())
 
@@ -487,15 +700,46 @@ def test_opencode_repeated_length_continues_until_terminal(tmp_path):
         asyncio.run(session.close())
 
 
-@pytest.mark.parametrize("returncode", [0, 1])
-def test_opencode_exit_without_contract_terminal_is_unrated_transport_failure(
-    tmp_path, returncode
+def test_opencode_clean_stop_without_terminal_continues_same_session(tmp_path):
+    import asyncio
+
+    session = _fake_opencode_session(tmp_path)
+    outputs = [
+        _step_finish("ses_stop", "stop"),
+        _step_finish("ses_stop", "stop"),
+    ]
+    calls = []
+
+    def invoke(prompt):
+        calls.append((prompt, session.session_id))
+        output = outputs.pop(0)
+        if not outputs:
+            session.terminal_file.write_text(
+                json.dumps({"reason": "contract_fulfilled"}), encoding="utf-8"
+            )
+        return SimpleNamespace(returncode=0, stdout=output, stderr="", timed_out=False)
+
+    session._invoke = invoke
+    try:
+        telemetry = asyncio.run(session.run_epoch("order"))
+        assert len(calls) == 2
+        assert calls[1][1] == "ses_stop"
+        assert "has not reported" in calls[1][0]
+        assert telemetry.transport_errors == 0
+        assert telemetry.continuation_reasons == ["reason:stop_without_terminal"]
+        assert telemetry.stop_reason == "contract_terminal:contract_fulfilled"
+    finally:
+        asyncio.run(session.close())
+
+
+def test_opencode_nonzero_exit_without_contract_terminal_is_unrated_transport_failure(
+    tmp_path,
 ):
     import asyncio
 
     session = _fake_opencode_session(tmp_path)
     session._invoke = lambda prompt: SimpleNamespace(
-        returncode=returncode,
+        returncode=1,
         stdout=_step_finish("ses_exit", "stop"),
         stderr="",
         timed_out=False,
@@ -504,10 +748,9 @@ def test_opencode_exit_without_contract_terminal_is_unrated_transport_failure(
         telemetry = asyncio.run(session.run_epoch("order"))
         assert telemetry.transport_errors == 1
         assert telemetry.failure_category == "provider_exit_without_terminal"
-        assert telemetry.stop_reason in {
-            "provider_exit_without_contract_terminal",
-            "provider_nonzero_exit_without_contract_terminal",
-        }
+        assert (
+            telemetry.stop_reason == "provider_nonzero_exit_without_contract_terminal"
+        )
         audit = json.loads(
             (tmp_path / "artifacts" / "epoch-0001.opencode.audit.json").read_text()
         )
@@ -549,7 +792,10 @@ def test_render_order_prompt_contains_commitment_relevant_facts():
     spec = _spec(1)
     prompt = render_order_prompt(spec)
     assert spec.item_name in prompt
-    assert str(spec.quantity) in prompt
+    expected_rate = spec.quantity / (spec.deadline_ticks / 3600)
+    assert f"{expected_rate:.3g}" in prompt
+    assert "REQUISITION" in prompt
+    assert "unattended production" in prompt
     assert str(spec.deadline_ticks) in prompt
     assert CUSTOMER_DEPOT_LOCATION in prompt
 
@@ -602,6 +848,7 @@ def test_openai_tool_manifest_is_flat_and_model_time_excludes_tools(monkeypatch)
     session.temperature = 0.0
     session.max_turns = 2
     session.messages = []
+    session._state_executor = None
 
     async def execute(_code, *, request_id=None):
         import asyncio
@@ -611,6 +858,7 @@ def test_openai_tool_manifest_is_flat_and_model_time_excludes_tools(monkeypatch)
 
     session._executor = execute
     import asyncio
+
     import scripts.adaptive_contract_benchmark as adaptive_runner
 
     clock = iter((0.0, 2.0, 12.0, 20.0))
@@ -918,6 +1166,15 @@ class FakeClient:
             state_hash="state",
         )
 
+    async def checkpoint(self, lease_id: str, name: str | None = None):
+        from fle.envd.models import RuntimeCheckpoint
+
+        return RuntimeCheckpoint(
+            lease_id=lease_id,
+            checkpoint_id=f"lifecycle:{name or 'checkpoint'}:fake",
+            runtime_backend="fake",
+        )
+
     async def capture_contract_context(
         self, lease_id: str, session_id: str, epoch_index: int
     ):
@@ -1055,6 +1312,7 @@ def _args(tmp_path, **overrides):
         "api_key": "unused",
         "envd_url": "http://127.0.0.1:1",
         "provider": "test-provider",
+        "harness": "native",
         "model": "test-model",
         "harness_version": ScriptedAgentSession.harness_version,
         "system_prompt_hash": "sp",
@@ -1114,12 +1372,8 @@ def test_end_to_end_session_loop(tmp_path, fake_client_factory):
     assert record.participant.tool_manifest_hash != "tm"
     assert record.participant.inference_settings_hash != "is"
     assert all(epoch.outcome.model_seconds > 0 for epoch in record.epochs)
-    assert any(
-        note.startswith("progress_vector_v1=") for note in persisted["notes"]
-    )
-    assert any(
-        note.startswith("portfolio_evidence_v1=") for note in persisted["notes"]
-    )
+    assert any(note.startswith("progress_vector_v1=") for note in persisted["notes"])
+    assert any(note.startswith("portfolio_evidence_v1=") for note in persisted["notes"])
 
     selection = json.loads(
         (tmp_path / "session-epochs" / "epoch-0001.selection.json").read_text(
@@ -1132,6 +1386,34 @@ def test_end_to_end_session_loop(tmp_path, fake_client_factory):
     active = json.loads((tmp_path / "active-order.json").read_text(encoding="utf-8"))
     assert active["epoch_index"] == 3
     assert active["status"] == "fulfilled"
+
+
+def test_epoch_checkpoint_resumes_rating_history_and_epoch_number(
+    tmp_path, fake_client_factory
+):
+    client = fake_client_factory(max_epochs=2)
+    output = tmp_path / "resumable.json"
+
+    first = asyncio.run(run_session(_args(tmp_path, output=output, max_rated_epochs=1)))
+    checkpoint_path = output.with_suffix(".json.checkpoint.json")
+    checkpoint = json.loads(checkpoint_path.read_text(encoding="utf-8"))
+
+    second = asyncio.run(
+        run_session(
+            _args(
+                tmp_path,
+                output=output,
+                max_rated_epochs=2,
+                resume_from=checkpoint_path,
+            )
+        )
+    )
+
+    assert checkpoint["phase"] == "between_epochs"
+    assert first.epochs[-1].spec.epoch_index == 1
+    assert [epoch.spec.epoch_index for epoch in second.epochs] == [1, 2]
+    assert second.final_rating.rated_epoch_count == 2
+    assert client.begun == [1, 2]
 
 
 def test_repetition_filter_cannot_become_order_ceiling(tmp_path, fake_client_factory):

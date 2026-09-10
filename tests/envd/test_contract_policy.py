@@ -56,6 +56,14 @@ RECIPES = [
         "enabled": True,
     },
     {
+        "name": "iron-gear-wheel",
+        "category": "crafting",
+        "energy": 0.5,
+        "ingredients": [{"name": "iron-plate", "amount": 2}],
+        "products": [{"name": "iron-gear-wheel", "amount": 1}],
+        "enabled": True,
+    },
+    {
         "name": "electronic-circuit",
         "category": "crafting",
         "energy": 0.5,
@@ -120,7 +128,7 @@ def _setup():
     return catalog, context, pool
 
 
-def test_unseen_frontier_is_a_commissioning_batch_not_stage_rate_bulk():
+def test_unseen_frontier_is_a_low_rate_autonomous_cold_start():
     catalog, context, pool = _setup()
     policy = EvidenceDrivenCustomerPolicy()
     circuit = pool[-1]
@@ -131,7 +139,10 @@ def test_unseen_frontier_is_a_commissioning_batch_not_stage_rate_bulk():
 
     assert quantity > 0
     assert deadline <= MAX_COMMISSIONING_DEADLINE_TICKS
-    assert evidence["basis"] == "commissioning_cold_start"
+    assert evidence["basis"] == "cold_start_autonomous_rate"
+    assert evidence["effective_mode"] == "throughput"
+    assert evidence["target_rate"] >= 0.5
+    assert deadline >= 45 * 60 * 60
 
 
 def test_recent_product_rotates_when_an_equivalent_alternative_exists():
@@ -154,6 +165,35 @@ def test_recent_product_rotates_when_an_equivalent_alternative_exists():
     assert plan.products[0].product == "iron-plate"
 
 
+def test_fresh_factory_selects_foundation_throughput():
+    catalog, context, pool = _setup()
+    pool.append(
+        _candidate(
+            catalog,
+            context,
+            "iron-gear-wheel",
+            0,
+            "consolidation",
+        )
+    )
+
+    plan = EvidenceDrivenCustomerPolicy().choose(
+        pool,
+        context=context,
+        catalog=catalog,
+        difficulty_model=UncalibratedDifficultyModel(),
+        selection_seed=17,
+    )
+
+    assert plan.products[0].product in {
+        "iron-plate",
+        "copper-plate",
+        "iron-gear-wheel",
+    }
+    assert plan.order_kind == "sustained"
+    assert plan.evidence["objective_kind"] == "autonomous_throughput"
+
+
 def test_policy_can_emit_mixed_and_sustained_orders_from_evidence():
     catalog, context, pool = _setup()
     policy = EvidenceDrivenCustomerPolicy()
@@ -169,6 +209,7 @@ def test_policy_can_emit_mixed_and_sustained_orders_from_evidence():
             sustained_window_rates=[20, 25, 30],
         )
     policy.completed_epochs = 3
+    policy.success_streak = 2
 
     plans = [
         policy.choose(
@@ -181,10 +222,10 @@ def test_policy_can_emit_mixed_and_sustained_orders_from_evidence():
         for seed in range(40)
     ]
 
-    assert any(len(plan.products) == 2 for plan in plans)
+    assert any(len(plan.products) >= 2 for plan in plans)
     assert any(plan.order_kind == "sustained" for plan in plans)
     assert all(line.quantity > 0 for plan in plans for line in plan.products)
-    mixed = next(plan for plan in plans if len(plan.products) == 2)
+    mixed = next(plan for plan in plans if len(plan.products) >= 2)
     assert all(
         "effective_difficulty" in line_evidence
         for line_evidence in mixed.evidence["lines"].values()
@@ -215,7 +256,7 @@ def test_throughput_uses_sustained_depot_lcb_and_keeps_zero_windows():
     assert evidence["target_rate"] < 60.0
 
 
-def test_stateful_policy_sequence_preserves_breadth_and_scales_from_evidence():
+def test_stateful_policy_stays_on_foundation_until_throughput_is_certified():
     catalog, context, pool = _setup()
     policy = EvidenceDrivenCustomerPolicy()
     plans = []
@@ -267,15 +308,19 @@ def test_stateful_policy_sequence_preserves_breadth_and_scales_from_evidence():
 
     first_products = [plan.products[0].product for plan in plans[:3]]
     assert set(first_products[:2]) == {"iron-plate", "copper-plate"}
-    assert first_products[2] == "electronic-circuit"
-    first_circuit = plans[2].products[0]
-    assert first_circuit.quantity <= 20
+    assert set(first_products).issubset({"iron-plate", "copper-plate"})
+    line_evidence = plans[2].evidence["lines"][first_products[2]]
+    assert line_evidence["basis"] == "cold_start_autonomous_rate"
+    assert line_evidence["target_rate"] >= 0.5
     assert plans[2].candidate.deadline_ticks <= MAX_COMMISSIONING_DEADLINE_TICKS
-    # One-shot deliveries establish commissioning/consolidation evidence, but
-    # cannot by themselves authorize a sustained qualification probe.
-    assert all(plan.order_kind == "one_shot" for plan in plans[3:])
+    assert all(plan.order_kind == "sustained" for plan in plans)
     assert all(plan.evidence["intent"] != "stress" for plan in plans)
-    assert any(len(plan.products) > 1 for plan in plans)
+    assert all(
+        {line.product for line in plan.products}.issubset(
+            {"iron-plate", "copper-plate"}
+        )
+        for plan in plans
+    )
 
 
 def test_attempts_only_are_not_capacity_or_throughput_evidence():
@@ -299,7 +344,7 @@ def test_attempts_only_are_not_capacity_or_throughput_evidence():
     )
     assert quantity > 0
     assert evidence["evidence_kind"] == "none"
-    assert evidence["basis"] == "commissioning_cold_start"
+    assert evidence["basis"] == "cold_start_autonomous_rate"
 
 
 def test_zero_delivery_with_capability_progress_replays_parent_at_lower_pressure():
@@ -407,10 +452,10 @@ def test_zero_delivery_lubricant_does_not_unlock_scaled_throughput():
     assert policy.records[candidate.item_name].attempts == 1
     assert policy.records[candidate.item_name].zero_delivery_count == 1
     assert not policy.records[candidate.item_name].capacity_evidence
-    assert evidence["basis"] == "commissioning_cold_start"
+    assert evidence["basis"] == "cold_start_autonomous_rate"
 
 
-def test_nested_order_windows_are_the_only_sustained_depot_evidence():
+def test_customer_windows_without_audit_are_not_capacity_evidence():
     catalog, context, pool = _setup()
     candidate = pool[0]
     spec = build_epoch_spec(
@@ -460,9 +505,10 @@ def test_nested_order_windows_are_the_only_sustained_depot_evidence():
     policy = EvidenceDrivenCustomerPolicy()
     policy.observe(spec, positive, None)
     record = policy.records[candidate.item_name]
-    assert record.sustained_window_scores == [1.0, 0.0]
+    assert record.sustained_window_scores == []
+    assert record.sustained_window_rates == []
     assert not record.sustained_evidence
-    assert record.completion_scores == [0.5]
+    assert record.completion_scores == [0.0]
 
     certified = positive.model_copy(
         update={
@@ -482,7 +528,7 @@ def test_nested_order_windows_are_the_only_sustained_depot_evidence():
     )
     certified_policy = EvidenceDrivenCustomerPolicy()
     certified_policy.observe(spec, certified, None)
-    assert certified_policy.records[candidate.item_name].sustained_evidence
+    assert not certified_policy.records[candidate.item_name].sustained_evidence
 
     zero = positive.model_copy(
         update={
@@ -569,6 +615,71 @@ def test_mixed_probe_does_not_require_independent_capacity_evidence():
     assert secondary.item_name != pool[0].item_name
     assert not policy._has_evidence(pool[0], context)
     assert not policy._has_evidence(secondary, context)
+
+
+def test_consecutive_autonomous_wins_prefer_composition_over_more_single_breadth():
+    catalog, context, pool = _setup()
+    policy = EvidenceDrivenCustomerPolicy()
+    policy.success_streak = 2
+    policy.records["iron-plate"] = ProductEvidence(
+        "iron-plate",
+        attempts=1,
+        fulfilled=1,
+        sustained_depot_count=1,
+        sustained_window_scores=[1.0],
+        sustained_window_rates=[10.0],
+    )
+
+    plan = policy.choose(
+        pool,
+        context=context,
+        catalog=catalog,
+        difficulty_model=UncalibratedDifficultyModel(),
+        selection_seed=17,
+        rating=CapabilityRating(
+            mu=5.0,
+            sigma=1.25,
+            conservative_score=1.25,
+            rated_epoch_count=2,
+        ),
+    )
+
+    assert len(plan.products) >= 2
+    assert plan.evidence["intent"] == "compose"
+    assert plan.evidence["success_streak"] == 2
+
+
+def test_successful_mixed_contract_pushes_the_local_frontier_next():
+    catalog, context, pool = _setup()
+    policy = EvidenceDrivenCustomerPolicy()
+    policy.success_streak = 3
+    policy._last_was_mixed = True
+    policy.records["iron-plate"] = ProductEvidence(
+        "iron-plate",
+        attempts=1,
+        fulfilled=1,
+        sustained_depot_count=1,
+        sustained_window_scores=[1.0],
+        sustained_window_rates=[10.0],
+    )
+
+    plan = policy.choose(
+        pool,
+        context=context,
+        catalog=catalog,
+        difficulty_model=UncalibratedDifficultyModel(),
+        selection_seed=17,
+        rating=CapabilityRating(
+            mu=5.0,
+            sigma=1.25,
+            conservative_score=1.25,
+            rated_epoch_count=3,
+        ),
+    )
+
+    assert [line.product for line in plan.products] == ["electronic-circuit"]
+    assert plan.evidence["intent"] == "expand"
+    assert plan.evidence["selection_reason"] == "establish_breadth"
 
 
 def test_structural_recovery_is_consumed_after_one_retry():
@@ -686,7 +797,7 @@ def test_rate_only_capability_delta_is_not_meaningful_progress():
     assert not delta.meaningful_progress
 
 
-def test_deepen_uses_a_low_rate_probe_after_one_shot_delivery():
+def test_deepen_ignores_one_shot_delivery_and_requests_autonomous_rate():
     catalog, context, pool = _setup()
     candidate = pool[0]
     policy = EvidenceDrivenCustomerPolicy()
@@ -704,16 +815,16 @@ def test_deepen_uses_a_low_rate_probe_after_one_shot_delivery():
         rng=random.Random(1),
     )
 
-    assert mode == "sustained_commissioning"
+    assert mode == "commissioning"
     _, deadline, evidence = policy._size_line(
         candidate, mode, context, catalog, random.Random(1)
     )
-    assert evidence["basis"] == "sustained_commissioning_probe"
+    assert evidence["basis"] == "cold_start_autonomous_rate"
     assert evidence["automated_capacity_evidence"] is False
     assert deadline >= 45 * 60 * 60
 
 
-def test_failed_commissioning_probe_retries_only_after_later_recovery():
+def test_legacy_probe_bookkeeping_cannot_change_autonomous_mode():
     _, context, pool = _setup()
     candidate = pool[0]
     policy = EvidenceDrivenCustomerPolicy()
@@ -728,27 +839,36 @@ def test_failed_commissioning_probe_retries_only_after_later_recovery():
     )
     policy.records[candidate.item_name] = record
 
-    # A failed probe must not immediately schedule another probe.
-    assert policy._mode_for_intent(
-        candidate, intent="deepen", context=context, rng=random.Random(1)
-    ) == "consolidation"
+    # Legacy probe counters are audit-only under the throughput policy.
+    assert (
+        policy._mode_for_intent(
+            candidate, intent="deepen", context=context, rng=random.Random(1)
+        )
+        == "commissioning"
+    )
 
     # A later fully successful non-probe delivery reopens one probe attempt.
     record.last_non_probe_success_epoch = 3
     record.last_epoch = 3
     record.positive_delivery_count = 2
-    assert policy._mode_for_intent(
-        candidate, intent="deepen", context=context, rng=random.Random(1)
-    ) == "sustained_commissioning"
+    assert (
+        policy._mode_for_intent(
+            candidate, intent="deepen", context=context, rng=random.Random(1)
+        )
+        == "commissioning"
+    )
 
     # Once that retry has also failed, another immediate retry is blocked.
     record.commissioning_probe_count = 2
     record.commissioning_probe_failure_count = 2
     record.last_commissioning_probe_epoch = 4
     record.last_epoch = 4
-    assert policy._mode_for_intent(
-        candidate, intent="deepen", context=context, rng=random.Random(1)
-    ) == "consolidation"
+    assert (
+        policy._mode_for_intent(
+            candidate, intent="deepen", context=context, rng=random.Random(1)
+        )
+        == "commissioning"
+    )
 
 
 def test_deepen_escalates_from_provenance_safe_automated_production():
@@ -832,17 +952,20 @@ def test_handcrafted_one_shot_flow_is_not_sustained_capacity_evidence():
     assert record.positive_delivery
     assert not record.observed_production
     assert not record.automated_capacity_evidence
-    assert policy._mode_for_intent(
-        candidate,
-        intent="deepen",
-        context=context,
-        rng=random.Random(1),
-    ) == "sustained_commissioning"
-    _, _, evidence = policy._size_line(
-        candidate, "sustained_commissioning", context, catalog, random.Random(1)
+    assert (
+        policy._mode_for_intent(
+            candidate,
+            intent="deepen",
+            context=context,
+            rng=random.Random(1),
+        )
+        == "commissioning"
     )
-    assert evidence["effective_mode"] == "sustained_commissioning"
-    assert evidence["basis"] == "sustained_commissioning_probe"
+    _, _, evidence = policy._size_line(
+        candidate, "commissioning", context, catalog, random.Random(1)
+    )
+    assert evidence["effective_mode"] == "throughput"
+    assert evidence["basis"] == "cold_start_autonomous_rate"
 
 
 def test_commissioning_probe_delivery_never_authorizes_sustained_capacity():
@@ -912,7 +1035,8 @@ def test_commissioning_probe_delivery_never_authorizes_sustained_capacity():
     )
     policy.observe(spec, outcome, context)
     record = policy.records[candidate.item_name]
-    assert record.commissioning_probe_count == 1
+    assert record.commissioning_probe_count == 0
+    assert record.completion_scores == [0.0]
     assert not record.sustained_evidence
     assert not record.automated_capacity_evidence
 

@@ -14,6 +14,16 @@ def main() -> None:
     parser.add_argument("--factorio-address", default="localhost")
     parser.add_argument("--rcon-ports", default="27000")
     parser.add_argument(
+        "--execution-game-speed",
+        type=float,
+        default=float(os.getenv("FLE_EXECUTION_GAME_SPEED", "10")),
+        help=(
+            "Factorio simulation speed while semantic actions execute. "
+            "This changes wall-clock observation speed, not action semantics "
+            "(default: 10; use 1 while observing)."
+        ),
+    )
+    parser.add_argument(
         "--audit-rcon-ports",
         default=os.getenv("FLE_AUDIT_RCON_PORTS", ""),
         help="Comma-separated reserved Factorio ports used only for cloned audits",
@@ -116,11 +126,14 @@ def main() -> None:
     ]
     if set(ports) & set(audit_ports):
         parser.error("--rcon-ports and --audit-rcon-ports must be disjoint")
+    if args.execution_game_speed <= 0:
+        parser.error("--execution-game-speed must be greater than zero")
     service = build_live_service(
         ports,
         address=args.factorio_address,
         lease_ttl_seconds=args.lease_ttl,
         audit_tcp_ports=audit_ports,
+        execution_game_speed=args.execution_game_speed,
     )
     uvicorn.run(create_app(service), host=args.host, port=args.port, workers=1)
 

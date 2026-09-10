@@ -19,6 +19,34 @@ from fle.envd.models import ContractContextSnapshot
 pytestmark = pytest.mark.no_factorio
 
 
+@pytest.mark.parametrize("typed", [True, False])
+def test_live_recipe_quantities_support_namespace_models(typed):
+    from types import SimpleNamespace
+    from fle.env.entities import Ingredient, Product, Recipe
+    from fle.envd.contract_features import NamespaceRecipeDataSource
+
+    recipe = Recipe(
+        name="iron-gear-wheel",
+        ingredients=[Ingredient(name="iron-plate", count=2)],
+        products=[Product(name="iron-gear-wheel", count=1)],
+    )
+    raw = (
+        recipe
+        if typed
+        else {
+            "name": "iron-gear-wheel",
+            "ingredients": [{"name": "iron-plate", "amount": 2}],
+            "products": [{"name": "iron-gear-wheel", "amount": 1}],
+        }
+    )
+    source = NamespaceRecipeDataSource(
+        SimpleNamespace(get_prototype_recipe=lambda _: raw)
+    )
+    facts = source.recipe("iron-gear-wheel")
+    assert facts.ingredients == (("iron-plate", 2.0),)
+    assert facts.products == (("iron-gear-wheel", 1.0),)
+
+
 RECIPES = [
     {
         "name": "iron-plate",
@@ -93,7 +121,7 @@ def _snapshot_kwargs(**overrides):
         session_id="session-1",
         epoch_index=0,
         captured_tick=1000,
-        technology_ids=("electricity",),
+        technology_ids=("steam-power",),
         unlocked_recipe_ids=("iron-plate",),
         inventory_counts={"iron-plate": 100},
         placed_entity_counts={"stone-furnace": 4},
@@ -120,6 +148,18 @@ def _snapshot(**overrides) -> ContractContextSnapshot:
 
 def _real_digest(snapshot: ContractContextSnapshot) -> str:
     return compute_state_digest(snapshot.model_dump())
+
+
+def test_supply_chain_requirements_preserve_intermediates_and_raw_inputs():
+    requirements = _catalog().supply_chain_requirements("electronic-circuit")
+
+    assert requirements == {
+        "iron-plate": 1.0,
+        "iron-ore": 1.0,
+        "copper-cable": 3.0,
+        "copper-plate": 1.5,
+        "copper-ore": 1.5,
+    }
 
 
 # ---------------------------------------------------------------------------
@@ -299,7 +339,9 @@ def test_capture_preserves_delivery_telemetry_and_separates_factory_target_band(
     assert snapshot.delivery_totals == {"iron-plate": 120.0}
     assert snapshot.delivery_rates_60s["iron-plate"] == pytest.approx(120.0)
     assert snapshot.delivery_telemetry is not None
-    assert snapshot.delivery_telemetry.raw_rates_300s["iron-plate"] == pytest.approx(24.0)
+    assert snapshot.delivery_telemetry.raw_rates_300s["iron-plate"] == pytest.approx(
+        24.0
+    )
 
     features = extract_difficulty_features(
         snapshot=snapshot,
@@ -338,15 +380,15 @@ def test_window_rate_uses_oldest_short_history_sample():
 
 def test_band_table_tests():
     base = _snapshot()
-    assert classify_progression_band(base) == 1  # electricity researched
+    assert classify_progression_band(base) == 1  # steam power researched
 
     band2 = _snapshot(
-        technology_ids=("electricity", "oil-processing"),
+        technology_ids=("steam-power", "oil-processing"),
     )
     assert classify_progression_band(band2) == 2
 
     band3 = _snapshot(
-        technology_ids=("electricity", "robotics"),
+        technology_ids=("steam-power", "robotics"),
     )
     assert classify_progression_band(band3) >= 3
 
@@ -355,7 +397,7 @@ def test_band_table_tests():
 
     endgame = _snapshot(
         technology_ids=(
-            "electricity",
+            "steam-power",
             "space-science-pack",
             "prod-effectivity-module-3",
         ),
@@ -377,11 +419,11 @@ def test_band_ratchet_never_moves_backward():
 
 def test_inventory_consumption_does_not_demote_band():
     rich = _snapshot(
-        technology_ids=("electricity",),
+        technology_ids=("steam-power",),
         inventory_counts={"iron-plate": 5000},
     )
     consumed = _snapshot(
-        technology_ids=("electricity",),
+        technology_ids=("steam-power",),
         inventory_counts={},
     )
     assert classify_progression_band(rich) == classify_progression_band(consumed)

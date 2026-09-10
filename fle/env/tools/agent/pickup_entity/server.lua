@@ -27,6 +27,14 @@ storage.actions.pickup_entity = function(player_index, x, y, entity)
             if ent.valid and ent.name == entity then
                 -- game.print("Found valid placed entity: " .. ent.name)
 
+                -- Contract delivery chests and other protected entities must
+                -- fail without changing inventory. Previously the tool added
+                -- the entity and all of its contents before this check, so a
+                -- rejected pickup duplicated items.
+                if not ent.can_be_destroyed() then
+                    error("Cannot pick up protected " .. ent.name)
+                end
+
                 -- Collect all items that need to be inserted
                 local items_to_insert = {}
 
@@ -76,11 +84,9 @@ storage.actions.pickup_entity = function(player_index, x, y, entity)
                     player.insert(item)
                 end
 
-                if ent.can_be_destroyed() then
-                    -- game.print("Picked up placed "..ent.name)
-                    pcall(ent.destroy{raise_destroy=false, do_cliff_correction=false})
-                    return true
-                end
+                -- game.print("Picked up placed "..ent.name)
+                pcall(ent.destroy{raise_destroy=false, do_cliff_correction=false})
+                return true
             end
         end
         return false

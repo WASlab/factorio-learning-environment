@@ -17,8 +17,12 @@ storage.actions.get_production_statistics = function(player_index, names, second
     -- Statistics maps contain active products, not every possible prototype.
     local produced, consumed = stats.input_counts, stats.output_counts
     local selected = {}
+    local unknown = {}
     if #names>0 then
-        for _, name in ipairs(names) do selected[name]=true end
+        local known = category=="item" and prototypes.item or prototypes.fluid
+        for _, name in ipairs(names) do
+            if known[name] then selected[name]=true else unknown[#unknown+1]=name end
+        end
     else
         for name in pairs(produced) do selected[name]=true end
         for name in pairs(consumed) do selected[name]=true end
@@ -40,5 +44,5 @@ storage.actions.get_production_statistics = function(player_index, names, second
     end
     return {available=true,tick=game.tick,surface=surface.name,force=force.name,
         category=category,window_seconds=seconds,entries=entries,truncated=#ordered>limit,
-        matching_products=#ordered,includes_manual_production=true}
+        matching_products=#ordered,unknown_products=unknown,includes_manual_production=true}
 end

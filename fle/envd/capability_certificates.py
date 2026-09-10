@@ -8,6 +8,7 @@ robust certificate.
 
 from __future__ import annotations
 
+import statistics
 from collections.abc import Iterable, Mapping
 from typing import Any
 
@@ -33,7 +34,8 @@ def _rate_map(snapshot: ContractContextSnapshot) -> dict[str, float]:
         if max(
             float(snapshot.production_rates_60s.get(product, 0.0)),
             float(snapshot.production_rates_300s.get(product, 0.0)),
-        ) > 0
+        )
+        > 0
     }
 
 
@@ -60,7 +62,8 @@ def commissioning_certificate(
         )
     )
     return CapabilityCertificate(
-        certificate_id=certificate_id or f"commissioned:{snapshot.captured_tick}:{product}",
+        certificate_id=certificate_id
+        or f"commissioned:{snapshot.captured_tick}:{product}",
         capability_id=f"product:{product}",
         session_id=snapshot.session_id,
         source_state_digest=snapshot.state_digest,
@@ -161,9 +164,7 @@ def contract_certificate(
     if not products:
         demand_quantities = {spec.item_name: float(spec.quantity)}
     else:
-        demand_quantities = {
-            line.product: float(line.quantity) for line in products
-        }
+        demand_quantities = {line.product: float(line.quantity) for line in products}
     window_minutes = max(float(spec.deadline_ticks) / 3600.0, 1e-9)
     target_rates = {
         product: quantity / window_minutes
@@ -178,22 +179,27 @@ def contract_certificate(
     }
     sustained = spec.order_kind == "sustained"
     qualification = outcome.autonomous_throughput
-    autonomous = bool(
-        sustained
-        and qualification is not None
-        and qualification.authoritative
-        and qualification.interventions_during_window == 0
-        and qualification.performance_score >= 0.60
-        and float(outcome.performance_score or outcome.completion_ratio) >= 0.60
+    audit = outcome.throughput_audit
+    outcome_score = float(
+        outcome.performance_score
+        if outcome.performance_score is not None
+        else outcome.completion_ratio
     )
-    if autonomous and qualification is not None:
-        observed_rates = dict(qualification.observed_rate_per_minute)
+    autonomous = bool(
+        sustained and audit is not None and audit.passed and outcome_score >= 1.0 - 1e-9
+    )
+    if autonomous:
+        if audit is not None and audit.passed:
+            observed_rates = dict(audit.depot_rates_per_minute)
+        elif qualification is not None:
+            observed_rates = dict(qualification.observed_rate_per_minute)
     target_path = ()
     delta = outcome.capability_delta
     if delta is not None:
         raw_path = delta.evidence.get("target_path", ())
         target_path = tuple(
-            node for node in raw_path
+            node
+            for node in raw_path
             if str(node).startswith("product:")
             and str(node).removeprefix("product:") not in demand_quantities
         )
@@ -203,11 +209,7 @@ def contract_certificate(
         source_state_digest=outcome.terminal_state_digest,
         captured_tick=spec.context.captured_tick,
         certified_at_tick=spec.context.captured_tick + outcome.simulation_ticks_used,
-        status=(
-            "autonomous"
-            if autonomous
-            else ("observed_sustained" if sustained else "commissioned")
-        ),
+        status=("autonomous" if autonomous else "commissioned"),
         evidence_source="qualification" if autonomous else "contract",
         demand_vector=target_rates,
         target_rate_per_minute=target_rates,
@@ -216,7 +218,9 @@ def contract_certificate(
         prerequisite_capability_ids=target_path,
         sustained_window_ticks=spec.deadline_ticks if sustained else 0,
         qualification_window_ticks=(
-            qualification.window_ticks
+            audit.holdout_ticks
+            if autonomous and audit is not None and audit.passed
+            else qualification.window_ticks
             if autonomous and qualification is not None
             else 0
         ),
@@ -224,11 +228,15 @@ def contract_certificate(
         autonomous_validation=autonomous,
         reliability=(
             min(
-                float(outcome.performance_score or outcome.completion_ratio),
-                float(qualification.performance_score),
+                outcome_score,
+                statistics.fmean(audit.line_scores.values())
+                if audit is not None and audit.line_scores
+                else float(qualification.performance_score)
+                if qualification is not None
+                else 0.0,
             )
-            if autonomous and qualification is not None
-            else float(outcome.performance_score or outcome.completion_ratio)
+            if autonomous
+            else outcome_score
         ),
         evidence={
             "epoch_index": spec.epoch_index,
@@ -239,6 +247,9 @@ def contract_certificate(
                 qualification.model_dump(mode="json")
                 if qualification is not None
                 else None
+            ),
+            "throughput_audit": (
+                audit.model_dump(mode="json") if audit is not None else None
             ),
         },
     )

@@ -1,4 +1,5 @@
 from datetime import datetime, timezone
+import base64
 
 import pytest
 
@@ -53,6 +54,33 @@ class FakeWorker(FactorioWorker):
             automated_production_score=self.score,
             state_hash=f"state-{int(self.score)}",
         )
+
+    def render_factory(
+        self,
+        lease_id: str,
+        *,
+        center_x=None,
+        center_y=None,
+        radius=32,
+        include_status=True,
+    ):
+        del lease_id, center_x, center_y
+        png = b"\x89PNG\r\n\x1a\nfixture"
+        return {
+            "schema_version": "factorio-factory-render-v1",
+            "media_type": "image/png",
+            "image_base64": base64.b64encode(png).decode("ascii"),
+            "image_sha256": "fixture",
+            "image_bytes": len(png),
+            "ticks": int(self.score * 60),
+            "include_status": include_status,
+            "viewport": {
+                "center_x": 0,
+                "center_y": 0,
+                "width_tiles": radius * 2,
+                "height_tiles": radius * 2,
+            },
+        }
 
     def finalize(self, lease_id, task, events):
         return VerificationSnapshot(

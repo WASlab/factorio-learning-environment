@@ -58,6 +58,7 @@ class PickupEntity(Tool):
 
         if position:
             x, y = position.x, position.y
+            self.ensure_reachable(position)
             response, elapsed = self.execute(self.player_index, x, y, name)
         elif isinstance(entity, ent.UndergroundBelt):
             x, y = entity.position.x, entity.position.y
@@ -72,6 +73,7 @@ class PickupEntity(Tool):
 
         elif isinstance(entity, ent.Entity):
             x, y = entity.position.x, entity.position.y
+            self.ensure_reachable(entity)
             response, elapsed = self.execute(self.player_index, x, y, name)
         else:
             raise ValueError("The second argument must be a Position object")

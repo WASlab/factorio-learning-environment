@@ -5,6 +5,15 @@ storage.objective_telemetry = storage.objective_telemetry or {
     resource_depletions = {},
     last_death_tick_by_agent = {},
 }
+storage.semantic_events = storage.semantic_events or {}
+
+local function semantic_event(kind, tick, payload)
+    local event = payload or {}
+    event.type = kind
+    event.tick = tick
+    table.insert(storage.semantic_events, event)
+    while #storage.semantic_events > 128 do table.remove(storage.semantic_events, 1) end
+end
 
 local function entity_summary(entity)
     if not entity or not entity.valid then
@@ -109,5 +118,40 @@ script.on_event(defines.events.on_resource_depleted, function(event)
             y = entity.position.y,
         } or {},
         surface = entity and entity.valid and entity.surface.name or nil,
+    })
+end)
+
+script.on_event(defines.events.on_research_finished, function(event)
+    semantic_event("research_completed", event.tick, {
+        technology = event.research and event.research.name or "unknown"
+    })
+end)
+
+script.on_event(defines.events.on_entity_damaged, function(event)
+    local entity = event.entity
+    if not entity or not entity.valid or entity.type ~= "character" then return end
+    for player_index, character in pairs(storage.agent_characters or {}) do
+        if character == entity then
+            semantic_event("under_attack", event.tick, {
+                player_index = player_index,
+                damage = event.final_damage_amount,
+                position = {x=entity.position.x, y=entity.position.y}
+            })
+            return
+        end
+    end
+end)
+
+script.on_event(defines.events.on_player_mined_entity, function(event)
+    local outputs = {}
+    if event.buffer and event.buffer.valid then
+        for name, count in pairs(storage.utils.get_contents_compat(event.buffer)) do
+            outputs[name] = count
+            storage.harvested_items[name] = (storage.harvested_items[name] or 0) + count
+        end
+    end
+    storage.manual_production_events = storage.manual_production_events or {}
+    table.insert(storage.manual_production_events, {
+        tick=event.tick, kind="harvested", outputs=outputs
     })
 end)

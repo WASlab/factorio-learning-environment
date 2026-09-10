@@ -13,7 +13,6 @@ import re
 import threading
 import uuid
 from datetime import datetime, timezone
-from typing import Iterable
 
 from fle.envd.errors import (
     MemoryConflict,
@@ -87,13 +86,19 @@ class SessionMemory:
         normalized = key.strip()
         if len(normalized.encode("utf-8")) > MAX_MEMORY_KEY_BYTES:
             raise ValueError(f"memory key exceeds {MAX_MEMORY_KEY_BYTES} bytes")
-        if normalized.startswith("/") or "\\" in normalized or ".." in normalized.split("/"):
+        if (
+            normalized.startswith("/")
+            or "\\" in normalized
+            or ".." in normalized.split("/")
+        ):
             raise ValueError("memory key must be a relative namespaced key")
         if any(ord(char) < 0x20 for char in normalized):
             raise ValueError("memory key contains a control character")
         return normalized
 
-    def list(self, *, prefix: str = "", limit: int = 50, cursor: str | int | None = None) -> MemoryListResponse:
+    def list(
+        self, *, prefix: str = "", limit: int = 50, cursor: str | int | None = None
+    ) -> MemoryListResponse:
         if limit < 1 or limit > 100:
             raise ValueError("limit must be between 1 and 100")
         start = _cursor(cursor)
@@ -136,19 +141,25 @@ class SessionMemory:
         digest = _sha256(content)
         with self._lock:
             current = self._entries.get(normalized)
-            current_revision = current.revision if current else self._revisions.get(normalized, 0)
+            current_revision = (
+                current.revision if current else self._revisions.get(normalized, 0)
+            )
             if expected_revision is not None and expected_revision != current_revision:
                 raise MemoryConflict(
                     f"memory key {normalized!r} is revision {current_revision}, "
                     f"expected {expected_revision}"
                 )
             if current is None and len(self._entries) >= self.max_entries:
-                raise MemoryLimitExceeded(f"memory entry limit ({self.max_entries}) reached")
+                raise MemoryLimitExceeded(
+                    f"memory entry limit ({self.max_entries}) reached"
+                )
             retained = sum(entry.byte_size for entry in self._entries.values())
             if current is not None:
                 retained -= current.byte_size
             if retained + content_bytes > self.max_total_bytes:
-                raise MemoryLimitExceeded(f"memory byte limit ({self.max_total_bytes}) reached")
+                raise MemoryLimitExceeded(
+                    f"memory byte limit ({self.max_total_bytes}) reached"
+                )
             revision = current_revision + 1
             entry = MemoryEntry(
                 key=normalized,
@@ -170,7 +181,9 @@ class SessionMemory:
                 expected_revision=expected_revision,
                 occurred_at=now,
             )
-            return MemoryMutationResponse(entry=entry.model_copy(deep=True), mutation=mutation)
+            return MemoryMutationResponse(
+                entry=entry.model_copy(deep=True), mutation=mutation
+            )
 
     def delete(
         self,
@@ -184,7 +197,9 @@ class SessionMemory:
         now = datetime.now(timezone.utc)
         with self._lock:
             current = self._entries.get(normalized)
-            current_revision = current.revision if current else self._revisions.get(normalized, 0)
+            current_revision = (
+                current.revision if current else self._revisions.get(normalized, 0)
+            )
             if current is None:
                 raise MemoryNotFound(f"memory key not found: {normalized}")
             if expected_revision is not None and expected_revision != current_revision:
@@ -244,16 +259,71 @@ class SessionMemory:
             start = _cursor(cursor)
             page = hits[start : start + limit]
             next_cursor = str(start + limit) if start + limit < len(hits) else None
-            return MemorySearchResponse(results=page, next_cursor=next_cursor, total=len(hits))
+            return MemorySearchResponse(
+                results=page, next_cursor=next_cursor, total=len(hits)
+            )
 
-    def trace(self, *, limit: int = 100, cursor: str | int | None = None) -> MemoryTraceResponse:
+    def trace(
+        self, *, limit: int = 100, cursor: str | int | None = None
+    ) -> MemoryTraceResponse:
         if limit < 1 or limit > 1000:
             raise ValueError("limit must be between 1 and 1000")
         with self._lock:
             start = _cursor(cursor)
-            events = [event.model_copy(deep=True) for event in self._mutations[start : start + limit]]
-            next_cursor = str(start + limit) if start + limit < len(self._mutations) else None
-            return MemoryTraceResponse(events=events, next_cursor=next_cursor, total=len(self._mutations))
+            events = [
+                event.model_copy(deep=True)
+                for event in self._mutations[start : start + limit]
+            ]
+            next_cursor = (
+                str(start + limit) if start + limit < len(self._mutations) else None
+            )
+            return MemoryTraceResponse(
+                events=events, next_cursor=next_cursor, total=len(self._mutations)
+            )
+
+    def export_state(self) -> dict:
+        with self._lock:
+            return {
+                "schema_version": "session-memory-resume-v1",
+                "limits": {
+                    "max_entries": self.max_entries,
+                    "max_content_bytes": self.max_content_bytes,
+                    "max_total_bytes": self.max_total_bytes,
+                },
+                "entries": {
+                    key: entry.model_dump(mode="json")
+                    for key, entry in self._entries.items()
+                },
+                "revisions": dict(self._revisions),
+                "mutations": [
+                    mutation.model_dump(mode="json") for mutation in self._mutations
+                ],
+            }
+
+    @classmethod
+    def from_state(cls, state: dict) -> "SessionMemory":
+        if state.get("schema_version") != "session-memory-resume-v1":
+            raise ValueError("unsupported session memory resume state")
+        limits = dict(state.get("limits") or {})
+        memory = cls(
+            max_entries=int(limits.get("max_entries", MAX_MEMORY_ENTRIES)),
+            max_content_bytes=int(
+                limits.get("max_content_bytes", MAX_MEMORY_CONTENT_BYTES)
+            ),
+            max_total_bytes=int(limits.get("max_total_bytes", MAX_MEMORY_TOTAL_BYTES)),
+        )
+        memory._entries = {
+            str(key): MemoryEntry.model_validate(value)
+            for key, value in dict(state.get("entries") or {}).items()
+        }
+        memory._revisions = {
+            str(key): int(value)
+            for key, value in dict(state.get("revisions") or {}).items()
+        }
+        memory._mutations = [
+            MemoryMutation.model_validate(value) for value in state.get("mutations", [])
+        ]
+        return memory
 
     def _mutation(
         self,

@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import re
 import threading
 import time
 import uuid
@@ -16,10 +17,9 @@ from fle.envd.errors import (
     InterventionLimitReached,
     LeaseFinalized,
     LeaseNotFound,
-    MemoryConflict,
-    MemoryLimitExceeded,
-    MemoryNotFound,
 )
+from fle.envd.lifecycle import CheckpointPool
+from fle.envd.memory import SessionMemory
 from fle.envd.models import (
     ActionEvent,
     ActiveContractState,
@@ -33,10 +33,11 @@ from fle.envd.models import (
     HealthStatus,
     Lease,
     Observation,
+    RuntimeCheckpoint,
+    ThroughputCheckResult,
     VerificationSnapshot,
     VerifierEvent,
 )
-from fle.envd.memory import SessionMemory
 from fle.envd.program_policy import ProgramPolicyViolation, validate_program
 
 
@@ -87,9 +88,7 @@ class EnvironmentService:
             raise ValueError("Lease and audit worker ids must be disjoint")
 
         self._workers = {worker.worker_id: worker for worker in workers}
-        self._audit_workers = {
-            worker.worker_id: worker for worker in audit_workers
-        }
+        self._audit_workers = {worker.worker_id: worker for worker in audit_workers}
         self._busy_audit_workers: set[str] = set()
         self._leases: dict[str, _LeaseRecord] = {}
         self._busy_workers: set[str] = set()
@@ -97,6 +96,15 @@ class EnvironmentService:
         self._lock = threading.RLock()
         self._audit_condition = threading.Condition(self._lock)
         self.capabilities = capabilities or CapabilityManifest()
+        checkpoint_capable = all(
+            type(worker).export_game_state is not FactorioWorker.export_game_state
+            and type(worker).export_resume_state
+            is not FactorioWorker.export_resume_state
+            for worker in workers
+        )
+        features = dict(self.capabilities.features)
+        features["checkpoints"] = checkpoint_capable
+        self.capabilities = self.capabilities.model_copy(update={"features": features})
         if audit_workers:
             features = dict(self.capabilities.features)
             features.update(
@@ -206,9 +214,134 @@ class EnvironmentService:
             expires_at=created + self._lease_ttl,
             tool_error_retry_budget=tool_error_retry_budget,
         )
+        record = _LeaseRecord(lease=lease, worker=worker)
+        if task.checkpoint_id.startswith("lifecycle:"):
+            payload = CheckpointPool().get_payload(task.checkpoint_id)
+            quality = payload.get("quality") if isinstance(payload, dict) else None
+            service_state = (
+                quality.get("service_state") if isinstance(quality, dict) else None
+            )
+            if isinstance(service_state, dict):
+                self._restore_service_state(record, service_state)
         with self._lock:
-            self._leases[lease.lease_id] = _LeaseRecord(lease=lease, worker=worker)
+            self._leases[lease.lease_id] = record
         return lease
+
+    @staticmethod
+    def _restore_service_state(record: _LeaseRecord, state: dict[str, Any]) -> None:
+        if state.get("schema_version") != "envd-service-resume-v1":
+            raise ValueError("unsupported envd service resume state")
+        record.events = [
+            ActionEvent.model_validate(value) for value in state.get("events", [])
+        ]
+        record.terminal_reason = state.get("terminal_reason")
+        record.active_commitment_hash = state.get("active_commitment_hash")
+        record.lease.tool_error_retries_used = int(
+            state.get("tool_error_retries_used", 0)
+        )
+        memory_state = state.get("memory")
+        if isinstance(memory_state, dict):
+            record.memory = SessionMemory.from_state(memory_state)
+        for entry in state.get("execute_request_cache", []):
+            cached_result = ExecutionResult.model_validate(entry["result"])
+            record.execute_request_cache[str(entry["request_id"])] = (
+                str(entry["code_sha256"]),
+                cached_result.model_copy(update={"lease_id": record.lease.lease_id}),
+            )
+        for entry in state.get("epoch_request_cache", []):
+            method = str(entry["method"])
+            value = entry.get("result")
+            if method == "begin":
+                restored = ActiveContractState.model_validate(value)
+            elif method == "finalize":
+                restored = ContractEpochOutcome.model_validate(value)
+            else:
+                restored = ThroughputCheckResult.model_validate(value)
+            if hasattr(restored, "lease_id"):
+                restored = restored.model_copy(
+                    update={"lease_id": record.lease.lease_id}
+                )
+            record.epoch_request_cache[(method, str(entry["request_id"]))] = restored
+
+    @staticmethod
+    def _service_resume_state(record: _LeaseRecord) -> dict[str, Any]:
+        return {
+            "schema_version": "envd-service-resume-v1",
+            "events": [event.model_dump(mode="json") for event in record.events],
+            "terminal_reason": record.terminal_reason,
+            "active_commitment_hash": record.active_commitment_hash,
+            "tool_error_retries_used": record.lease.tool_error_retries_used,
+            "memory": record.memory.export_state(),
+            "execute_request_cache": [
+                {
+                    "request_id": request_id,
+                    "code_sha256": code_sha256,
+                    "result": result.model_dump(mode="json"),
+                }
+                for request_id, (
+                    code_sha256,
+                    result,
+                ) in record.execute_request_cache.items()
+            ],
+            "epoch_request_cache": [
+                {
+                    "method": method,
+                    "request_id": request_id,
+                    "result": (
+                        result.model_dump(mode="json")
+                        if hasattr(result, "model_dump")
+                        else result
+                    ),
+                }
+                for (method, request_id), result in record.epoch_request_cache.items()
+            ],
+        }
+
+    def checkpoint(self, lease_id: str, name: str | None = None) -> RuntimeCheckpoint:
+        record = self._live_record(lease_id)
+        with record.lock:
+            raw_state = record.worker.export_game_state()
+            if raw_state is None:
+                raise RuntimeError("Factorio worker could not export game state")
+            safe_name = re.sub(r"[^A-Za-z0-9_-]+", "-", name or lease_id).strip("-")
+            lineage = f"lifecycle:{safe_name or lease_id}"
+            episode = time.time_ns()
+            checkpoint_pool = CheckpointPool()
+            checkpoint_id = checkpoint_pool.save(
+                lineage,
+                episode,
+                raw_state,
+                quality_summary={
+                    "schema_version": "factorio-resume-checkpoint-v1",
+                    "worker_state": record.worker.export_resume_state(),
+                    "service_state": self._service_resume_state(record),
+                },
+            )
+            if safe_name.startswith(
+                (
+                    "mcp-active-",
+                    "native-active-",
+                    "runner-active-",
+                    "runner-boundary-",
+                )
+            ):
+                checkpoint_pool.prune(lineage, keep=2)
+            get_session_state = getattr(
+                record.worker, "get_contract_session_state", None
+            )
+            session_state = get_session_state() if get_session_state else None
+            self._renew(record)
+            return RuntimeCheckpoint(
+                lease_id=lease_id,
+                checkpoint_id=checkpoint_id,
+                runtime_backend="local-fle",
+                metadata={
+                    "active_epoch_index": getattr(
+                        session_state, "active_epoch_index", None
+                    ),
+                    "event_sequence": len(record.events),
+                },
+            )
 
     def _record(self, lease_id: str) -> _LeaseRecord:
         self.reap_expired()
@@ -268,7 +401,7 @@ class EnvironmentService:
                 )
             sequence = len(record.events) + 1
             try:
-                validate_program(code)
+                validate_program(code, action_profile=record.lease.task.action_profile)
             except ProgramPolicyViolation as exc:
                 # Policy rejections are evaluation outcomes, not malformed HTTP
                 # requests. Preserve them in the trajectory so retry budgets,
@@ -340,6 +473,26 @@ class EnvironmentService:
                                         "event": "throughput_audit_passed"
                                         if audit.passed
                                         else "throughput_audit_failed",
+                                        "failure_reasons": list(audit.failure_reasons),
+                                        "line_scores": dict(audit.line_scores),
+                                        "production_rates_per_minute": dict(
+                                            audit.production_rates_per_minute
+                                        ),
+                                        "depot_rates_per_minute": dict(
+                                            audit.depot_rates_per_minute
+                                        ),
+                                        "minimum_production_subwindow_rates": {
+                                            product: min(rates or [0.0])
+                                            for product, rates in (
+                                                audit.production_subwindow_rates.items()
+                                            )
+                                        },
+                                        "minimum_depot_subwindow_rates": {
+                                            product: min(rates or [0.0])
+                                            for product, rates in (
+                                                audit.depot_subwindow_rates.items()
+                                            )
+                                        },
                                     },
                                 )
                             )
@@ -407,7 +560,9 @@ class EnvironmentService:
         with record.lock:
             query = getattr(record.worker, "query_state", None)
             if query is None:
-                raise NotImplementedError("state history is unavailable for this worker")
+                raise NotImplementedError(
+                    "state history is unavailable for this worker"
+                )
             result = query(
                 lease_id,
                 kind=kind,
@@ -418,6 +573,55 @@ class EnvironmentService:
                 area=area,
                 changed_since=changed_since,
                 limit=limit,
+            )
+            self._renew(record)
+            return result
+
+    def craft_plan(
+        self, lease_id: str, *, product: str, quantity: int = 1, depth: int = 2
+    ) -> dict[str, Any]:
+        record = self._live_record(lease_id)
+        with record.lock:
+            result = record.worker.craft_plan(
+                lease_id, product=product, quantity=quantity, depth=depth
+            )
+            self._renew(record)
+            return result
+
+    def camera(
+        self,
+        lease_id: str,
+        *,
+        settings: dict[str, Any] | None = None,
+        include_image: bool = True,
+    ) -> dict[str, Any]:
+        record = self._live_record(lease_id)
+        with record.lock:
+            result = record.worker.camera(
+                lease_id, settings=settings, include_image=include_image
+            )
+            self._renew(record)
+            return result
+
+    def render_factory(
+        self,
+        lease_id: str,
+        *,
+        center_x: float | None = None,
+        center_y: float | None = None,
+        radius: int = 32,
+        include_status: bool = True,
+    ) -> dict[str, Any]:
+        """Render one lease under the same lock as other live-state reads."""
+
+        record = self._live_record(lease_id)
+        with record.lock:
+            result = record.worker.render_factory(
+                lease_id,
+                center_x=center_x,
+                center_y=center_y,
+                radius=radius,
+                include_status=include_status,
             )
             self._renew(record)
             return result
@@ -579,6 +783,11 @@ class EnvironmentService:
             if record.snapshot is not None:
                 raise LeaseFinalized(f"Lease is already finalized: {lease_id}")
             state = record.worker.begin_contract_epoch(spec)
+            # A throughput audit terminates the current epoch, not the
+            # persistent adaptive-session lease. Once the runner has finalized
+            # that epoch and successfully opened the next one, mutations must
+            # be accepted again.
+            record.terminal_reason = None
             record.active_commitment_hash = spec.commitment_hash
             if request_id:
                 record.epoch_request_cache[("begin", request_id)] = state
@@ -604,6 +813,12 @@ class EnvironmentService:
                         return cached
         record = self._live_record(lease_id)
         with record.lock:
+            # A retry can arrive while the first finalize is still running.
+            # Recheck after acquiring the worker lock, not only before it.
+            if request_id and not abandon:
+                cached_hit, cached = self._replay(record, "finalize", request_id)
+                if cached_hit:
+                    return cached
             stored_hash = record.active_commitment_hash
             if stored_hash is not None and stored_hash != commitment_hash:
                 raise CommitmentMismatch(

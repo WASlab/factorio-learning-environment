@@ -171,6 +171,52 @@ class HTTPEnvironmentClient:
             "GET", f"/v1/leases/{lease_id}/state/query", params=params
         )
 
+    async def craft_plan(
+        self, lease_id: str, *, product: str, quantity: int = 1, depth: int = 2
+    ) -> dict[str, object]:
+        return await self._request(
+            "GET",
+            f"/v1/leases/{lease_id}/craft-plan",
+            params={"product": product, "quantity": quantity, "depth": depth},
+        )
+
+    async def camera(
+        self,
+        lease_id: str,
+        *,
+        settings: dict[str, object] | None = None,
+        include_image: bool = True,
+    ) -> dict[str, object]:
+        return await self._request(
+            "POST" if settings is not None else "GET",
+            f"/v1/leases/{lease_id}/camera",
+            params={"include_image": str(include_image).lower()},
+            **({"json": settings} if settings is not None else {}),
+        )
+
+    async def render_factory(
+        self,
+        lease_id: str,
+        *,
+        center_x: float | None = None,
+        center_y: float | None = None,
+        radius: int = 32,
+        include_status: bool = True,
+    ) -> dict[str, object]:
+        params = {
+            key: value
+            for key, value in {
+                "center_x": center_x,
+                "center_y": center_y,
+                "radius": radius,
+                "include_status": str(include_status).lower(),
+            }.items()
+            if value is not None
+        }
+        return await self._request(
+            "GET", f"/v1/leases/{lease_id}/render", params=params
+        )
+
     async def check_contract_throughput(
         self,
         lease_id: str,
@@ -201,7 +247,9 @@ class HTTPEnvironmentClient:
         params = {"prefix": prefix, "limit": limit}
         if cursor is not None:
             params["cursor"] = cursor
-        data = await self._request("GET", f"/v1/leases/{lease_id}/memory", params=params)
+        data = await self._request(
+            "GET", f"/v1/leases/{lease_id}/memory", params=params
+        )
         return MemoryListResponse.model_validate(data)
 
     async def memory_read(self, lease_id: str, key: str) -> MemoryEntry:
@@ -343,18 +391,35 @@ class HTTPEnvironmentClient:
         infrastructure_interrupt: bool = False,
         request_id: str | None = None,
     ) -> ContractEpochOutcome:
-        data = await self._request(
-            "POST",
-            f"/v1/leases/{lease_id}/contract/finalize",
-            json={
-                "epoch_index": epoch_index,
-                "commitment_hash": commitment_hash,
-                "abandon": abandon,
-                "infrastructure_interrupt": infrastructure_interrupt,
-                "request_id": request_id,
-            },
-        )
-        return ContractEpochOutcome.model_validate(data)
+        payload = {
+            "epoch_index": epoch_index,
+            "commitment_hash": commitment_hash,
+            "abandon": abandon,
+            "infrastructure_interrupt": infrastructure_interrupt,
+            "request_id": request_id,
+        }
+        # Finalization may commit before the response connection drops. Only
+        # retry requests covered by the service's idempotency cache, and reuse
+        # the exact payload and request ID on every attempt.
+        attempts = 3 if request_id and not abandon else 1
+        for attempt in range(attempts):
+            try:
+                data = await self._request(
+                    "POST", f"/v1/leases/{lease_id}/contract/finalize", json=payload
+                )
+                return ContractEpochOutcome.model_validate(data)
+            except (
+                aiohttp.ClientConnectionError,
+                aiohttp.ClientPayloadError,
+                asyncio.TimeoutError,
+            ) as exc:
+                if attempt + 1 == attempts:
+                    raise EnvironmentClientError(
+                        f"Infrastructure interruption: epoch {epoch_index} finalization "
+                        f"transport failed after {attempts} attempt(s); outcome is uncertain. "
+                        f"Resume with the same request ID {request_id!r}."
+                    ) from exc
+                await asyncio.sleep(2**attempt)
 
     async def get_contract_session_state(self, lease_id: str) -> ContractSessionState:
         data = await self._request("GET", f"/v1/leases/{lease_id}/contract/state")

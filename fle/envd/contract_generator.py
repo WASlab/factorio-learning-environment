@@ -188,6 +188,22 @@ def default_templates() -> TemplateBank:
 
     consolidation = [
         ContractTemplateSpec(
+            template_id="foundation-automation",
+            mixture_class="consolidation",
+            families=("smelting", "components", "logistics"),
+            products=(
+                "iron-plate",
+                "copper-plate",
+                "stone-brick",
+                "iron-gear-wheel",
+                "transport-belt",
+                "inserter",
+            ),
+            stage_bands=(0, 1, 2),
+            pressure_multiplier_range=(1.0, 1.5),
+            production_window_minutes_range=(30.0, 60.0),
+        ),
+        ContractTemplateSpec(
             template_id="consolidate-smelting",
             mixture_class="consolidation",
             families=("smelting",),
@@ -208,6 +224,22 @@ def default_templates() -> TemplateBank:
             stage_bands=(1, 2, 3, 4, 5),
             pressure_multiplier_range=(1.3, 2.5),
             production_window_minutes_range=(10.0, 40.0),
+        ),
+        ContractTemplateSpec(
+            template_id="consolidate-science",
+            mixture_class="consolidation",
+            families=("science",),
+            products=(
+                "automation-science-pack",
+                "logistic-science-pack",
+                "chemical-science-pack",
+                "production-science-pack",
+                "utility-science-pack",
+                "space-science-pack",
+            ),
+            stage_bands=(1, 2, 3, 4, 5),
+            pressure_multiplier_range=(1.0, 1.8),
+            production_window_minutes_range=(20.0, 60.0),
         ),
         ContractTemplateSpec(
             template_id="consolidate-advanced-components",
@@ -257,8 +289,11 @@ def default_templates() -> TemplateBank:
         ContractTemplateSpec(
             template_id="frontier-early-automation",
             mixture_class="frontier",
-            families=("smelting", "circuits"),
-            products=("steel-plate", "electronic-circuit"),
+            families=("circuits",),
+            # This is the functional electrification gate. A certified circuit
+            # rate requires autonomous dual-input assembly, power, transport,
+            # and depot service. Steel would allow burner-only progression.
+            products=("electronic-circuit",),
             stage_bands=(1,),
             pressure_multiplier_range=(1.0, 1.4),
             production_window_minutes_range=(20.0, 50.0),
@@ -271,6 +306,22 @@ def default_templates() -> TemplateBank:
             stage_bands=(2,),
             pressure_multiplier_range=(1.0, 1.6),
             production_window_minutes_range=(20.0, 60.0),
+        ),
+        ContractTemplateSpec(
+            template_id="frontier-science",
+            mixture_class="frontier",
+            families=("science",),
+            products=(
+                "automation-science-pack",
+                "logistic-science-pack",
+                "chemical-science-pack",
+                "production-science-pack",
+                "utility-science-pack",
+                "space-science-pack",
+            ),
+            stage_bands=(1, 2, 3, 4, 5),
+            pressure_multiplier_range=(1.0, 1.4),
+            production_window_minutes_range=(30.0, 75.0),
         ),
         ContractTemplateSpec(
             template_id="frontier-processing-units",
@@ -436,9 +487,7 @@ def _resolve_product(
 
     produced = {
         item
-        for item, rate in (
-            automated_rates_300(snapshot)
-        ).items()
+        for item, rate in (automated_rates_300(snapshot)).items()
         if rate > EPSILON_RATE
     }
 
@@ -736,9 +785,7 @@ def _rejection_reason(
                     "maximum_target_band": min(factory_band + 1, 5),
                 },
             )
-        maximum_depth = min(
-            MAX_FRONTIER_RECIPE_DEPTH, max(3, factory_band + 3)
-        )
+        maximum_depth = min(MAX_FRONTIER_RECIPE_DEPTH, max(3, factory_band + 3))
         if facts.depth > maximum_depth:
             return (
                 "frontier_graph_too_deep",
@@ -882,7 +929,9 @@ def build_epoch_spec(
     if not candidate.accepted or candidate.features is None:
         raise ValueError("Cannot commit a rejected candidate")
     lines = products or (
-        ProductDemandSpec(product=candidate.item_name, quantity=float(candidate.quantity)),
+        ProductDemandSpec(
+            product=candidate.item_name, quantity=float(candidate.quantity)
+        ),
     )
     return ContractEpochSpec.create(
         schema_version=ADAPTIVE_BENCHMARK_SCHEMA_VERSION,

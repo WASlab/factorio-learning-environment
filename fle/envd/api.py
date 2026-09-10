@@ -1,9 +1,10 @@
 from __future__ import annotations
 
+import inspect
 from contextlib import asynccontextmanager
 from typing import Any
 
-from fastapi import FastAPI, HTTPException, Response
+from fastapi import FastAPI, HTTPException, Query, Response
 from pydantic import BaseModel, ConfigDict, Field
 
 from fle.envd.errors import (
@@ -38,6 +39,12 @@ class LeaseRequest(RequestModel):
 class ExecuteRequest(RequestModel):
     code: str
     request_id: str | None = Field(default=None, min_length=1, max_length=128)
+
+
+class CameraRequest(RequestModel):
+    enabled: bool | None = None
+    radius: int | None = Field(default=None, ge=8, le=192)
+    entity_limit: int | None = Field(default=None, ge=1, le=128)
 
 
 class ForkRequest(RequestModel):
@@ -215,6 +222,50 @@ def create_app(service: EnvironmentService) -> FastAPI:
         except ValueError as exc:
             raise HTTPException(status_code=422, detail=str(exc)) from exc
 
+    @app.get("/v1/leases/{lease_id}/craft-plan")
+    def craft_plan(
+        lease_id: str,
+        product: str,
+        quantity: int = Query(1, ge=1, le=1000000),
+        depth: int = Query(2, ge=0, le=3),
+    ):
+        return service.craft_plan(
+            lease_id, product=product, quantity=quantity, depth=depth
+        )
+
+    @app.get("/v1/leases/{lease_id}/camera")
+    def camera(lease_id: str, include_image: bool = True):
+        return service.camera(lease_id, include_image=include_image)
+
+    @app.post("/v1/leases/{lease_id}/camera")
+    def configure_camera(
+        lease_id: str, request: CameraRequest, include_image: bool = True
+    ):
+        return service.camera(
+            lease_id,
+            settings=request.model_dump(exclude_none=True),
+            include_image=include_image,
+        )
+
+    @app.get("/v1/leases/{lease_id}/render")
+    def render_factory(
+        lease_id: str,
+        center_x: float | None = None,
+        center_y: float | None = None,
+        radius: int = 32,
+        include_status: bool = True,
+    ):
+        try:
+            return service.render_factory(
+                lease_id,
+                center_x=center_x,
+                center_y=center_y,
+                radius=radius,
+                include_status=include_status,
+            )
+        except ValueError as exc:
+            raise HTTPException(status_code=422, detail=str(exc)) from exc
+
     @app.post("/v1/leases/{lease_id}/throughput-check")
     def throughput_check(lease_id: str, request: ThroughputCheckRequest):
         return service.check_contract_throughput(
@@ -224,7 +275,9 @@ def create_app(service: EnvironmentService) -> FastAPI:
     # -- model-managed memory; lease-scoped and never a host filesystem API --
 
     @app.get("/v1/leases/{lease_id}/memory")
-    def memory_list(lease_id: str, prefix: str = "", limit: int = 50, cursor: str | None = None):
+    def memory_list(
+        lease_id: str, prefix: str = "", limit: int = 50, cursor: str | None = None
+    ):
         return service.memory_list(lease_id, prefix=prefix, limit=limit, cursor=cursor)
 
     @app.get("/v1/leases/{lease_id}/memory/read")
@@ -247,7 +300,9 @@ def create_app(service: EnvironmentService) -> FastAPI:
         )
 
     @app.get("/v1/leases/{lease_id}/memory/search")
-    def memory_search(lease_id: str, query: str, limit: int = 20, cursor: str | None = None):
+    def memory_search(
+        lease_id: str, query: str, limit: int = 20, cursor: str | None = None
+    ):
         return service.memory_search(lease_id, query, limit=limit, cursor=cursor)
 
     @app.get("/v1/leases/{lease_id}/memory/trace")
@@ -257,6 +312,10 @@ def create_app(service: EnvironmentService) -> FastAPI:
     @app.post("/v1/leases/{lease_id}/finalize")
     def finalize(lease_id: str):
         return service.finalize(lease_id)
+
+    @app.post("/v1/leases/{lease_id}/checkpoints", status_code=201)
+    def checkpoint(lease_id: str, request: CheckpointRequest):
+        return service.checkpoint(lease_id, request.name)
 
     # -- adaptive contract benchmark (privileged HTTP, never agent tools) --
 
@@ -284,9 +343,7 @@ def create_app(service: EnvironmentService) -> FastAPI:
         ).model_dump(mode="json")
 
     @app.post("/v1/leases/{lease_id}/contract/qualify-throughput")
-    def contract_qualify_throughput(
-        lease_id: str, request: ThroughputCheckRequest
-    ):
+    def contract_qualify_throughput(lease_id: str, request: ThroughputCheckRequest):
         return service.check_contract_throughput(
             lease_id,
             authoritative=True,
@@ -402,9 +459,57 @@ def create_agentenv_app(service) -> FastAPI:
         except ValueError as exc:
             raise HTTPException(status_code=422, detail=str(exc)) from exc
 
+    @app.get("/v1/leases/{lease_id}/craft-plan")
+    async def craft_plan(
+        lease_id: str,
+        product: str,
+        quantity: int = Query(1, ge=1, le=1000000),
+        depth: int = Query(2, ge=0, le=3),
+    ):
+        return await service.craft_plan(
+            lease_id, product=product, quantity=quantity, depth=depth
+        )
+
+    @app.get("/v1/leases/{lease_id}/camera")
+    async def camera(lease_id: str, include_image: bool = True):
+        return await service.camera(lease_id, include_image=include_image)
+
+    @app.post("/v1/leases/{lease_id}/camera")
+    async def configure_camera(
+        lease_id: str, request: CameraRequest, include_image: bool = True
+    ):
+        return await service.camera(
+            lease_id,
+            settings=request.model_dump(exclude_none=True),
+            include_image=include_image,
+        )
+
+    @app.get("/v1/leases/{lease_id}/render")
+    async def render_factory(
+        lease_id: str,
+        center_x: float | None = None,
+        center_y: float | None = None,
+        radius: int = 32,
+        include_status: bool = True,
+    ):
+        try:
+            return await service.render_factory(
+                lease_id,
+                center_x=center_x,
+                center_y=center_y,
+                radius=radius,
+                include_status=include_status,
+            )
+        except ValueError as exc:
+            raise HTTPException(status_code=422, detail=str(exc)) from exc
+
     @app.get("/v1/leases/{lease_id}/memory")
-    async def memory_list(lease_id: str, prefix: str = "", limit: int = 50, cursor: str | None = None):
-        return await service.memory_list(lease_id, prefix=prefix, limit=limit, cursor=cursor)
+    async def memory_list(
+        lease_id: str, prefix: str = "", limit: int = 50, cursor: str | None = None
+    ):
+        return await service.memory_list(
+            lease_id, prefix=prefix, limit=limit, cursor=cursor
+        )
 
     @app.get("/v1/leases/{lease_id}/memory/read")
     async def memory_read(lease_id: str, key: str):
@@ -426,7 +531,9 @@ def create_agentenv_app(service) -> FastAPI:
         )
 
     @app.get("/v1/leases/{lease_id}/memory/search")
-    async def memory_search(lease_id: str, query: str, limit: int = 20, cursor: str | None = None):
+    async def memory_search(
+        lease_id: str, query: str, limit: int = 20, cursor: str | None = None
+    ):
         return await service.memory_search(lease_id, query, limit=limit, cursor=cursor)
 
     @app.get("/v1/leases/{lease_id}/memory/trace")
@@ -452,7 +559,8 @@ def create_agentenv_app(service) -> FastAPI:
 
     @app.post("/v1/leases/{lease_id}/checkpoints", status_code=201)
     async def checkpoint(lease_id: str, request: CheckpointRequest):
-        return await service.checkpoint(lease_id, request.name)
+        result = service.checkpoint(lease_id, request.name)
+        return await result if inspect.isawaitable(result) else result
 
     return app
 
@@ -468,15 +576,18 @@ def build_live_service(
     address: str = "localhost",
     lease_ttl_seconds: int = 900,
     audit_tcp_ports: list[int] | None = None,
+    execution_game_speed: float = 10,
 ) -> EnvironmentService:
     from fle.envd.backend import FLEWorker
 
     workers = [
-        FLEWorker.connect(f"factorio-{index}", port, address)
+        FLEWorker.connect(f"factorio-{index}", port, address, execution_game_speed)
         for index, port in enumerate(tcp_ports)
     ]
     audit_workers = [
-        FLEWorker.connect(f"factorio-audit-{index}", port, address)
+        FLEWorker.connect(
+            f"factorio-audit-{index}", port, address, execution_game_speed
+        )
         for index, port in enumerate(audit_tcp_ports or [])
     ]
     return EnvironmentService(

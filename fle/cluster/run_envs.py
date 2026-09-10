@@ -5,6 +5,8 @@ import platform
 import subprocess
 import sys
 import socket
+import secrets
+import json
 from pathlib import Path
 import shutil
 import yaml
@@ -15,6 +17,8 @@ from platformdirs import user_state_dir
 START_RCON_PORT = 27000
 START_GAME_PORT = 34197
 RCON_PASSWORD = "factorio"
+FACTORIO_VERSION = "2.0.77"
+OBSERVER_NAME = "fle-observer"
 
 
 def resolve_state_dir() -> Path:
@@ -59,8 +63,8 @@ class ComposeGenerator:
     """Compose YAML generator with centralized path handling."""
 
     rcon_password = RCON_PASSWORD
-    image = "factoriotools/factorio:2.0.73"
-    map_gen_seed = 44340
+    image = f"factoriotools/factorio:{FACTORIO_VERSION}"
+    default_map_gen_seed = 44340
     internal_rcon_port = 27015
     internal_game_port = 34197
 
@@ -68,7 +72,8 @@ class ComposeGenerator:
         self,
         attach_mod=False,
         save_file=None,
-        scenario="default_lab_scenario",
+        scenario="open_world",
+        map_gen_seed: int = default_map_gen_seed,
         state_dir: Path | None = None,
         work_dir: Path | None = None,
         pkg_scenarios_dir: Path | None = None,
@@ -79,6 +84,7 @@ class ComposeGenerator:
         self.attach_mod = attach_mod
         self.save_file = save_file
         self.scenario = scenario
+        self.map_gen_seed = int(map_gen_seed)
         self.state_dir = (state_dir or resolve_state_dir()).resolve()
         self.work_dir = (work_dir or resolve_work_dir()).resolve()
         # Package resource directories (read-only)
@@ -123,13 +129,11 @@ class ComposeGenerator:
         # Remove DLC data dirs so the server runs vanilla base-game only;
         # this prevents "Sync mods with server" / "No release" errors for
         # clients that don't own Space Age.
-        return (
-            f"/bin/sh -c '"
-            f"rm -rf /opt/factorio/data/elevated-rails "
-            f"/opt/factorio/data/quality "
-            f"/opt/factorio/data/space-age && "
-            f"exec {factorio_cmd}'"
+        prelude = (
+            "rm -rf /opt/factorio/data/elevated-rails "
+            "/opt/factorio/data/quality /opt/factorio/data/space-age"
         )
+        return f"/bin/sh -c '{prelude} && exec {factorio_cmd}'"
 
     def _mod_path(self):
         env_override = os.environ.get("FLE_MODS_PATH")
@@ -176,6 +180,8 @@ class ComposeGenerator:
 
     def _bundled_mods_volume(self):
         """Stage bundled mod config in writable runtime state and mount that copy."""
+        from fle.cluster.runtime_scenario import RUNTIME_MOD_NAME, stage_runtime_mod
+
         pkg_root = ir.files("fle.cluster")
         bundled_mods_dir = Path(pkg_root / "mods")
         if not bundled_mods_dir.exists():
@@ -188,6 +194,22 @@ class ComposeGenerator:
         for source in bundled_mods_dir.iterdir():
             if source.is_file():
                 shutil.copy2(source, runtime_mods_dir / source.name)
+        stage_runtime_mod(
+            runtime_mods_dir,
+            Path(ir.files("fle") / "env"),
+            OBSERVER_NAME,
+        )
+        mod_list_path = runtime_mods_dir / "mod-list.json"
+        mod_list = json.loads(mod_list_path.read_text(encoding="utf-8"))
+        mods = [
+            mod
+            for mod in mod_list.get("mods", [])
+            if mod.get("name") != RUNTIME_MOD_NAME
+        ]
+        mods.append({"name": RUNTIME_MOD_NAME, "enabled": True})
+        mod_list_path.write_text(
+            json.dumps({"mods": mods}, indent=2) + "\n", encoding="utf-8"
+        )
 
         return {
             "source": str(runtime_mods_dir.resolve()),
@@ -212,29 +234,50 @@ class ComposeGenerator:
         }
 
     def _scenarios_volume(self):
-        # Resolve from package resources if provided
         scenarios_dir = self.pkg_scenarios_dir
         if scenarios_dir is None:
             pkg_root = ir.files("fle.cluster")
             scenarios_dir = Path(pkg_root / "scenarios")
         if not scenarios_dir.exists():
             raise ValueError(f"Scenarios directory '{scenarios_dir}' does not exist.")
+
         return {
-            "source": str(scenarios_dir.resolve()),
+            "source": str(Path(scenarios_dir).resolve()),
             "target": "/opt/factorio/scenarios",
             "type": "bind",
         }
 
     def _config_volume(self):
-        # Resolve from package resources if provided
+        # Stage config so each local cluster can have an uncommitted observer
+        # password shared only with `fle watch`.
         config_dir = self.pkg_config_dir
         if config_dir is None:
             pkg_root = ir.files("fle.cluster")
             config_dir = Path(pkg_root / "config")
         if not config_dir.exists():
             raise ValueError(f"Config directory '{config_dir}' does not exist.")
+
+        runtime_config_dir = self.state_dir / "config"
+        runtime_settings = runtime_config_dir / "server-settings.json"
+        existing_password = ""
+        if runtime_settings.is_file():
+            try:
+                existing_password = json.loads(runtime_settings.read_text())[
+                    "game_password"
+                ]
+            except (KeyError, TypeError, ValueError):
+                existing_password = ""
+        runtime_config_dir.mkdir(parents=True, exist_ok=True)
+        for source in Path(config_dir).iterdir():
+            if source.is_file():
+                shutil.copy2(source, runtime_config_dir / source.name)
+        settings = json.loads(runtime_settings.read_text(encoding="utf-8"))
+        settings["game_password"] = existing_password or secrets.token_urlsafe(24)
+        runtime_settings.write_text(
+            json.dumps(settings, indent=2) + "\n", encoding="utf-8"
+        )
         return {
-            "source": str(config_dir.resolve()),
+            "source": str(runtime_config_dir.resolve()),
             "target": "/opt/factorio/config",
             "type": "bind",
         }
@@ -248,7 +291,6 @@ class ComposeGenerator:
                 self._scenarios_volume(),
                 self._config_volume(),
                 self._screenshots_volume(),
-                # Include bundled mod-list config (disables DLC for client sync)
                 self._bundled_mods_volume(),
             ]
             if self.save_file:
@@ -266,6 +308,10 @@ class ComposeGenerator:
                 ],
                 "pull_policy": "missing",
                 "restart": "unless-stopped",
+                "labels": {
+                    "fle.scenario": self.scenario,
+                    "fle.map-seed": str(self.map_gen_seed),
+                },
                 "user": "factorio",
                 "volumes": volumes,
             }
@@ -306,11 +352,19 @@ class ClusterManager:
         cmd = self.compose_cmd.split() + args
         subprocess.run(cmd, check=True)
 
-    def generate(self, num_instances, scenario, attach_mod=False, save_file=None):
+    def generate(
+        self,
+        num_instances,
+        scenario,
+        attach_mod=False,
+        save_file=None,
+        map_gen_seed=ComposeGenerator.default_map_gen_seed,
+    ):
         generator = ComposeGenerator(
             attach_mod=attach_mod,
             save_file=save_file,
             scenario=scenario,
+            map_gen_seed=map_gen_seed,
             state_dir=self.state_dir,
             work_dir=self.work_dir,
             pkg_scenarios_dir=self.pkg_scenarios_dir,
@@ -339,7 +393,14 @@ class ClusterManager:
                 listening.append(f"tcp/{tcp_port}")
         return listening
 
-    def start(self, num_instances, scenario, attach_mod=False, save_file=None):
+    def start(
+        self,
+        num_instances,
+        scenario,
+        attach_mod=False,
+        save_file=None,
+        map_gen_seed=ComposeGenerator.default_map_gen_seed,
+    ):
         listening = self._find_port_conflicts(num_instances)
         if listening:
             print("Error: Required ports are in use:")
@@ -350,7 +411,7 @@ class ClusterManager:
             )
             sys.exit(1)
 
-        self.generate(num_instances, scenario, attach_mod, save_file)
+        self.generate(num_instances, scenario, attach_mod, save_file, map_gen_seed)
 
         # Path summary
         print("Paths:")
@@ -416,13 +477,20 @@ class ClusterManager:
         print(out)
 
 
-def start_cluster(num_instances, scenario, attach_mod=False, save_file=None):
+def start_cluster(
+    num_instances,
+    scenario="open_world",
+    attach_mod=False,
+    save_file=None,
+    map_gen_seed=ComposeGenerator.default_map_gen_seed,
+):
     manager = ClusterManager()
     manager.start(
         num_instances=num_instances,
         scenario=scenario,
         attach_mod=attach_mod,
         save_file=save_file,
+        map_gen_seed=map_gen_seed,
     )
 
 

@@ -75,7 +75,7 @@ def early_automation_progression_task() -> FactorioTaskSpec:
                 constraint_id="action-profile",
                 kind="required_action_profile",
                 description="Use the auditable FLE program action profile.",
-                limit="fle-program-v1",
+                limit="semantic-motor-v1",
             ),
         ],
         verifier=VerifierSpec(
@@ -134,7 +134,7 @@ def automation_research_milestone_task() -> FactorioTaskSpec:
                 constraint_id="action-profile",
                 kind="required_action_profile",
                 description="Use the auditable FLE program action profile.",
-                limit="fle-program-v1",
+                limit="semantic-motor-v1",
             ),
         ],
         verifier=VerifierSpec(
@@ -178,9 +178,7 @@ def circuit_no_manual_crafting_task() -> FactorioTaskSpec:
     return FactorioTaskSpec(
         task_id="robustness_circuit_no_manual_v1",
         backend_task_id="electronic_circuit_throughput",
-        goal=(
-            "Sustain electronic-circuit production without using manual crafting."
-        ),
+        goal=("Sustain electronic-circuit production without using manual crafting."),
         task_family="robustness",
         objectives=[
             ObjectiveSpec(
@@ -293,8 +291,7 @@ def efficient_iron_throughput_task() -> FactorioTaskSpec:
         task_id="robustness_efficient_iron_v1",
         backend_task_id="iron_plate_throughput",
         goal=(
-            "Sustain iron-plate production within raw-resource and pollution "
-            "budgets."
+            "Sustain iron-plate production within raw-resource and pollution budgets."
         ),
         task_family="robustness",
         objectives=[

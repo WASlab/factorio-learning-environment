@@ -1,124 +1,126 @@
-"""Compact public API reference injected into model-facing task prompts."""
+"""Compact model-facing reference for the canonical semantic motor profile."""
 
 from __future__ import annotations
 
 import hashlib
 
-ACTION_PROFILE_REFERENCE_ID = "fle-program-v1/reference-v5"
+ACTION_PROFILE_REFERENCE_ID = "semantic-motor-v1/reference-v1"
 
 ACTION_PROFILE_REFERENCE = """\
-There are two tool boundaries. The harness calls `factorio_observe_factory`
-directly when it needs a factory snapshot, and calls
-`factorio_execute_program` directly to submit one program. Inside
-`factorio_execute_program`, write ordinary short Python using the names
-already loaded below. Calls made by that program are the programmatic action
-composition path: they run synchronously in source order, can use normal
-Python control flow, and together count as one environment intervention.
-Do not try to emit MCP calls from the program.
-Do not import FLE or use reflection (dir, type, getattr, private/dunder
-attributes); host, file, and network access are unavailable.
+Operate and expand a persistent factory, emphasizing autonomous production,
+throughput, and research while satisfying the current contract. The harness
+submits one short Python program through `factorio_execute_program`; calls,
+loops, and conditionals inside it execute in source order and count as one
+intervention. Do not import FLE or use reflection. Do not emit MCP calls from
+a program or use host/file/network access or private attributes.
 
-Parallel-call semantics: a harness may issue requests concurrently, including
-multiple requests for one lease, but envd serializes all operations for a
-lease. Do not assume same-lease world mutations overlap or that completion
-order is the submission order; use the returned event sequence. Independent
-leases may run in parallel when capacity is available.
+This is a turn-based semantic-motor environment. Factorio is paused while you
+reason and runs during actions. Walking, mining, native crafting, machines,
+belts, research, pollution, power, and deliveries all advance on real game
+ticks. Game speed only changes wall-clock execution speed. Interaction actions
+auto-approach their exact requested target. The controller routes the character
+around obstacles; it never chooses a factory route or silently changes a
+placement. Use explicit waypoints or path corners for strategic layout choices.
 
-Core signatures and return values:
+Execution receipts include public machine `status_changes`, anchored to an
+observation revision. Inspect these for no_fuel, no_power, no_ingredients, and
+blocked output. Events are sampled every 60 simulation ticks over registered
+machines; sub-second changes can be missed. Coalesced events retain observed
+statuses and peak severity. `truncated` or `history_expired` means the feed is
+incomplete: query public state with kind='alerts' and since_revision, or request
+a current observation. Initial/reconnected state is a keyframe, not a transition.
+
+Core inspection and interaction:
 - inspect_inventory(entity=None) -> Inventory
 - get_entities(entities=set(), position=None, radius=1000) -> list[Entity]
 - nearest(Prototype.X or Resource.X) -> Position
-    X must be one specific member. Bare Resource/Prototype classes and strings
-    are invalid; use Resource.Coal, Resource.IronOre, Prototype.StoneFurnace, etc.
-- move_to(position: Position) -> Position
-- harvest_resource(position: Position, quantity=1) -> int
-- get_prototype_recipe(Prototype.X or RecipeName.X) -> Recipe
-- craft_item(Prototype.X, quantity=1) -> int
-- can_place_entity(Prototype.X, direction=Direction.UP, position=Position(x, y)) -> bool
-- place_entity(Prototype.X, direction=Direction.UP, position=Position(x, y), exact=True) -> Entity
-- place_entity_next_to(Prototype.X, reference_position: Position, direction, spacing=0) -> Entity
-- get_entity(Prototype.X, position: Position) -> Entity or None
-- pickup_entity(entity: Entity) -> bool
-- rotate_entity(entity: Entity, direction=Direction.UP) -> Entity
-- insert_item(Prototype.X, target: Entity, quantity=5) -> Entity
-- extract_item(Prototype.X, source: Entity or Position, quantity=5) -> int
-- set_entity_recipe(entity: Entity, RecipeName.X) -> Entity
-- connect_entities(source, target, Prototype.TransportBelt/Pipe/SmallElectricPole)
-- get_resource_patch(Resource.X, position: Position, radius=30) -> ResourcePatch
-- set_research(Technology.X), get_research_progress(Technology.X)
-- wait(ticks, until=None, poll_ticks=300) -> dict
-    Advances the live factory for up to `ticks`. Machines, belts, research,
-    power, and deliveries continue normally. An optional inventory condition
-    stops early, for example:
-    wait(18000, until={'inventory': {'entity': furnace,
-         'item': Prototype.StoneBrick, 'at_least': 100}})
-    Returns requested/waited ticks, actual simulation ticks advanced, action
-    ticks charged, condition_met, and the last observed value. Contract
-    deadlines continue to apply while waiting.
-- sleep(seconds), retained as a compatibility wrapper for short waits
-- print(...) for measured feedback
+- get_entity(Prototype.X, position) -> Entity; resolve_entity(entity.id) -> Entity
+- get_entity_ports(entity) -> {inputs, outputs}
+- move_to(target, stop_distance=0, mode='walk', waypoints=None,
+    interrupt_on=None, timeout_ticks=36000) -> Position
+    Open coordinates are exact; occupied coordinates resolve to the nearest
+    walkable point in interaction range. stop_distance stops earlier.
+- harvest_resource(position, quantity=1) -> int
+- insert_item(item, target, quantity=5) -> Entity
+- extract_item(item, source, quantity=5) -> int
+- transfer_item(item, source, target, quantity=5) -> dict
+- pickup_entity(entity), rotate_entity(entity, direction)
+- set_entity_recipe(entity, RecipeName.X)
 
-Blueprint library (reusable factory fragments):
-- blueprint('save', name='smelter', x=0, y=0, radius=32) -> dict
-    Captures player-owned entities in the area around Position(x, y) and
-    stores them under `name` for this episode (and later episodes when a
-    persistent library is provisioned). radius=0 captures everything you own.
-    Returns {'saved': name, 'entity_count': n, ...}.
-- blueprint('place', source, x, y) -> dict
-    Places a stored blueprint by its name, or an inline Factorio exchange
-    string. Placement debits every required item from your character
-    inventory up front (all-or-nothing: if anything is missing you get back
-    {'error': 'missing_materials', 'missing': {...}} and nothing is built),
-    then charges construction time on the task clock. Returns
-    {'placed': count, 'items_consumed': {...}, ...}.
-- blueprint('list') -> {'blueprints': [{'name', 'entity_count', ...}]}
-- blueprint('get', name) -> {'name', 'content'}  # full exchange string
-Prefer placing saved blueprints by name; reserve raw strings for novel
-designs. Blueprints reuse designs, they do not create matter: stockpile the
-materials a design needs before placing it.
+Construction is exact and non-atomic. Earlier successful placements remain
+when a later placement fails:
+- place_entity(Prototype.X, direction=Direction.UP, position=Position(x,y), exact=True)
+- place_path(prototype, points, routing='polyline', on_collision='stop',
+    on_insufficient_materials='stop') -> structured partial/completed receipt
+    Segments are axis-aligned; specify every corner. The controller infers
+    segment orientations but does not route around obstacles.
+- place_grid(prototype, origin, rows, columns, spacing=(x,y), direction=...)
+- repeat_pattern(pattern, origin, count, stride), where each pattern entry has
+    prototype, offset, and optional direction
+- place_between(prototype, source, target, position) infers orientation only;
+    you still choose the placement tile
+- place_power_line(points, pole, spacing=7) places poles along your corridor
+- place_offshore_pump(preferred_position, direction=...) provides the one
+    explicit shoreline-snapping exception
 
-RecipeName is the canonical recipe namespace. Use it for every recipe, including
-RecipeName.IronGearWheel, RecipeName.AutomationSciencePack,
-RecipeName.PlasticBar, RecipeName.BasicOilProcessing,
-RecipeName.UraniumProcessing, and RecipeName.LightOilCracking. Prototype names
-identify entities and items and are not accepted by set_entity_recipe.
+`connect_entities`, `nearest_buildable`, move_to laying/leading, and generic
+non-exact placement belong to `planner-assisted-v1` and are rejected here.
 
-Reference and recipe-name details:
-- `get_prototype_recipe(Prototype.Lab)` is the normal way to inspect the
-  lab's exact crafting recipe. `Prototype.Lab` names the placeable entity; it
-  is not a valid argument to `set_entity_recipe`.
-- `RecipeName.FillLubricantBarrel` maps to the Factorio recipe ID
-  `lubricant-barrel`. The phrase `fill-lubricant-barrel` is a compatibility
-  alias for reference lookup, not the ID emitted by the Factorio 2.0 export.
-- `petroleum-gas` is a fluid product, not a unique recipe. Ask
-  `factorio_search_reference` for petroleum-gas, then select one exact recipe
-  ID such as `basic-oil-processing`, `advanced-oil-processing`,
-  `coal-liquefaction`, or `light-oil-cracking` before planning or configuring
-  a refinery or chemical plant.
+Native asynchronous work and event-oriented waits:
+- submit_actions(actions, interrupt_on=None) executes a finite command queue
+    immediately and returns when completed, halted, or interrupted. Each action
+    is {'id': optional_name, 'action': name, 'args': [...], 'kwargs': {...}}.
+    Use {'$result': id} inside later args to consume an earlier result. The
+    queue stops on the first execution failure without undoing prior actions.
+- inspect_action_queue(); cancel_actions(from_index=None);
+    insert_actions(before_index, actions); resume_actions(). Pending actions
+    persist across model turns. Indices are zero-based. Capability availability
+    is checked when submitted; inventory, geometry, and other state-dependent
+    constraints are checked when each action executes. Common interrupts are
+    action_failure, research_completed, under_attack, and new_order.
+- get_craft_plan(Prototype.X, quantity=1, depth=2) reads the native crafting menu:
+    craftable_now counts output items including native intermediate crafting;
+    ingredients show have/need/missing. Subrecipes are bounded independent
+    previews sharing the same inventory, not a combined allocation plan.
+    factorio_get_craft_plan exposes the same read without a program intervention.
+- queue_craft(Prototype.X, quantity=1) -> {handle, queued, queued_crafts, partial, tick}
+    quantity and queued count output items; recipes round up to whole crafts.
+    Partial native queues are reported explicitly. Failures include craft_plan.
+- get_craft_queue() -> {active, queue, tick}; cancel_craft(index=1, quantity=None)
+- craft_item(...) is blocking compatibility sugar; prefer queue_craft so hand
+    crafting overlaps movement and other live actions
+- wait(ticks, until=None, poll_ticks=30) waits authoritative game ticks and may
+    stop early on exactly one condition: inventory, research, craft_queue,
+    production_rate, machine_status, delivery, or event. Engine samples latch the
+    first match; decision_tick and poll_latency_ticks separate the decision from
+    transport delay. Production rates include manual production. Example:
+    wait(18000, until={'inventory': {'entity': chest,
+        'item': Prototype.IronPlate, 'at_least': 100}})
+    wait(18000, until={'production_rate': {'item': Prototype.IronPlate,
+        'at_least': 200, 'window_seconds': 60}})
+- get_production_statistics(items=None, window_seconds=60, category='item', limit=32)
+    reads native produced/consumed totals and per-minute rates, including manual
+    production. Windows: 5/60/600/3600 seconds; category: item/fluid. Results are
+    bounded with truncation metadata. query_state(kind='production') includes
+    these public statistics as well as observation history.
+- queue_research([Technology.X, Technology.Y]) appends enabled technologies to
+    Factorio's native queue; set_research(Technology.X) replaces the queue
+- get_research_progress(Technology.X)
 
-Examples:
-  coal_position = nearest(Resource.Coal)  # nearest returns a Position
-  move_to(coal_position)
-  harvest_resource(coal_position, 5)
+Customer output:
+- set_delivery_chest(chest, product) binds an existing empty player-owned chest;
+  high-rate lines may allow multiple chests and report the remaining allowance
+  for the current product. Only inserter-fed delivery counts. Excess remains in
+  the chest and it becomes ordinary when the order ends.
 
-  machine = place_entity(Prototype.AssemblingMachine1, position=Position(0, 0))
-  machine = set_entity_recipe(machine, RecipeName.IronGearWheel)
-
-  labs = get_entities({Prototype.Lab}, position=Position(0, 0), radius=20)
-  if labs:
-      insert_item(Prototype.AutomationSciencePack, labs[0], 1)
-
-Names use CamelCase enums such as Prototype.IronPlate, Prototype.PumpJack,
-Resource.IronOre, Technology.Automation, Direction.UP, and Position(x, y).
-Inspect recipes, inventories, entities, status, and production before assuming
-a plan worked. Re-fetch entities after the world changes because returned entity
-objects can become stale. Entity values use attributes such as entity.name and
-entity.position, not dictionary indexing; a Position has x and y only.
-
-The character can normally act only within about 10 tiles. Call move_to(target)
-before harvesting or placing at a distant target. Use the supplied starting
-inventory before mining or crafting, and do not build production chains that
-the stated objective does not require.
+RecipeName is the recipe namespace; Prototype identifies items/entities. Query
+get_prototype_recipe before assuming ingredients. Trigger technologies cannot
+be started with set_research: inspect their research_trigger in the game-data
+reference and satisfy it. Returned entities include stable integer `id` handles;
+use resolve_entity(id) after the world changes instead of trusting stale fields.
+Every operation still obeys reach, collision, inventory, native duration, and
+partial effects. Inspect the returned receipt or re-query state before assuming
+a plan worked.
 """
 
 ACTION_PROFILE_REFERENCE_SHA256 = hashlib.sha256(

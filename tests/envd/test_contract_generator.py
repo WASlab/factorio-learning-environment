@@ -85,7 +85,7 @@ def _context(**overrides) -> ContractContextSnapshot:
         session_id="s",
         epoch_index=0,
         captured_tick=1000,
-        technology_ids=("electricity",),
+        technology_ids=("steam-power",),
         unlocked_recipe_ids=("iron-plate",),
         inventory_counts={"iron-plate": 50},
         placed_entity_counts={"stone-furnace": 4},
@@ -278,6 +278,13 @@ def test_frontier_targets_exactly_one_band_ahead():
         context_band(bootstrap, DEFAULT_TEMPLATE_BANK.get("frontier-early-automation"))
         == 1
     )
+
+
+def test_early_automation_frontier_cannot_bypass_electrification():
+    template = DEFAULT_TEMPLATE_BANK.get("frontier-early-automation")
+
+    assert template.families == ("circuits",)
+    assert template.products == ("electronic-circuit",)
 
 
 def test_technology_prerequisites_and_machine_setup_are_in_deadline_floor():

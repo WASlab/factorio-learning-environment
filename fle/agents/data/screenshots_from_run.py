@@ -174,7 +174,11 @@ def capture_screenshots_with_hooks(
     print(f"Starting screenshot numbering from {screenshot_counter}")
 
     # Reset camera settings
-    instance.rcon_client.send_command("/c storage.camera = nil")
+    instance.rcon_client.send_command(
+        "/c if remote.interfaces['fle_runtime'] then "
+        "remote.call('fle_runtime', 'dispatch', '__clear_camera') "
+        "else storage.camera = nil end"
+    )
 
     def capture_after_placement(tool_instance, result):
         nonlocal screenshot_counter
@@ -278,7 +282,11 @@ def capture_screenshots(
 
     print(f"Found {existing_count} existing screenshots out of {total_needed} needed")
 
-    instance.rcon_client.send_command("/c storage.camera = nil")
+    instance.rcon_client.send_command(
+        "/c if remote.interfaces['fle_runtime'] then "
+        "remote.call('fle_runtime', 'dispatch', '__clear_camera') "
+        "else storage.camera = nil end"
+    )
 
     for idx, (program_id, created_at) in enumerate(program_ids):
         # Skip if screenshot already exists

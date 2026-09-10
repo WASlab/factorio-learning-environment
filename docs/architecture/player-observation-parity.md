@@ -1,6 +1,6 @@
 # Player observation parity implementation
 
-Status: in progress, 2026-09-08.
+Status: integrated and verified, 2026-09-09.
 
 The agent should receive public information comparable to a player looking at
 the factory, map, crafting menu, production statistics, and objective panel.
@@ -9,25 +9,25 @@ This checklist tracks integration and verification, not just tool definitions.
 
 ## Completion checklist
 
-- [ ] Passive status transitions: bounded lease journal, stable entity identity,
+- [x] Passive status transitions: bounded lease journal, stable entity identity,
   simulation ticks, observation revisions, severity, reconnect queries, and
   execution receipts. Coalesce repeated samples per entity per simulation second.
-- [ ] Terrain context: bounded water, cliffs, trees, resources, occupancy, and
+- [x] Terrain context: bounded water, cliffs, trees, resources, occupancy, and
   walkability summaries; coarse map detail at large radii.
-- [ ] Persistent camera: enabled by default, configurable radius and opt-out;
+- [x] Persistent camera: enabled by default, configurable radius and opt-out;
   image context on model turns across supported harnesses and the workbench.
-- [ ] Nearby entity tooltips: bounded persistent contents, fuel, recipe, status,
+- [x] Nearby entity tooltips: bounded persistent contents, fuel, recipe, status,
   and warnings in camera state. Keep full state separate from transition events.
 - [x] Exact placement diagnostics: identify blocking entities and terrain without
   placing ghosts, selecting alternate builds, or changing placement semantics.
 - [x] Path diagnostics: explain failure and return alternatives only when their
   reachability is established; never move to an unrequested destination.
-- [ ] Stateless crafting menu: required/available/missing ingredients, native
+- [x] Stateless crafting menu: required/available/missing ingredients, native
   craftability, bounded subrecipes, and the same information on queue failures.
 - [x] Public production statistics, with bounded windows and optional rendering.
 - [x] Event waits for public machine/production/research/order conditions, with
   explicit tick bounds and auditable termination reasons.
-- [ ] Persistent objective presentation and completion of the existing selectable
+- [x] Persistent objective presentation and completion of the existing selectable
   technology/rocket progression integration and workbench verification.
 - [ ] Focused tests, boundary tests, isolated live validation, documentation,
   and coherent commits for each completed feature.
@@ -66,6 +66,42 @@ Status ticks are absolute engine ticks; revisions belong to the lease.
 Validation: isolated Factorio 2.0.77 furnace transitions during one 300-tick wait,
 plus Lua/Python tests for ring overrun, removal, wire arrays, coalescing, immutable
 receipts, checkpoint serialization, revision queries, and transport failures.
+
+## Camera, tooltips, crafting, and objectives
+
+The camera is enabled by default for each lease. `factorio_set_camera` persists
+`enabled`, `radius` (8–192 tiles), and `entity_limit` (1–128, default 32).
+`factorio_get_camera` reads the same view. Checkpoint recovery restores these
+settings. Native model requests and MCP results carry the image and a compact
+public objective view; retained image artifacts also appear in the Factory
+workspace beside that objective. The dashboard identifies the last recorded
+image by its game tick, rather than presenting it as a live video stream.
+
+Near views use the factory renderer. Wide views switch to a fixed-size coarse
+map, retaining resource patches, water, trees, cliffs, and machine occupancy
+without rendering individual terrain sprites. Terrain layers describe presence
+within cells, not an exact pathfinding grid. Nearby machine details are bounded
+and include contents, fuel, recipe, status, and warnings; full entity inspection
+remains a separate read. Missing sprites use visible fallback markers.
+
+`factorio_get_craft_plan` is a stateless crafting-menu read. Product quantities
+are converted to recipe batches using native output counts. The response gives
+native craftability, ingredients available/required/missing, and bounded
+subrecipes. Queue failures expose the same ingredient differences. The tool does
+not queue ingredients, choose a factory design, or execute a recursive plan.
+
+Validation includes native request image attachment, MCP image routing, bounded
+payloads, settings/checkpoint round trips, and an isolated live HTTP boundary
+check with near and wide PNGs. The Factory workspace was visually checked with
+those recorded images and a clearly labelled fixture. This validates integration;
+it is not evidence of a model completing a full freeplay evaluation. See
+[`evaluation-modes.md`](evaluation-modes.md) for the distinct progression goals.
+
+The expected benefit is fewer blind placement, crafting, and machine-state
+decisions. Costs include image tokens, bounded rendering work, and additional
+public state in context. Coarse maps sacrifice precision; sampled status changes
+can miss short transients. Explicit truncation, retention gaps, image ticks,
+deeper read tools, and persistent camera opt-out keep those tradeoffs visible.
 
 ## Spatial failures
 

@@ -56,11 +56,11 @@ def test_passive_snapshot_is_commissioned_even_with_60_second_rate():
         CapabilityCertificate.model_validate(
             certificate.model_dump()
             | {
-            "status": "autonomous",
-            "evidence_source": "snapshot",
-            "autonomous_validation": True,
-            "qualification_window_ticks": 3600,
-            "sustained_window_ticks": 3600,
+                "status": "autonomous",
+                "evidence_source": "snapshot",
+                "autonomous_validation": True,
+                "qualification_window_ticks": 3600,
+                "sustained_window_ticks": 3600,
             }
         )
 
@@ -116,7 +116,7 @@ def test_observed_sustained_is_not_autonomous_without_frozen_qualification():
     assert current.observed_sustained_throughput == 20.0
 
 
-def test_sustained_contract_is_observed_but_never_autonomous():
+def test_sustained_delivery_without_audit_is_only_commissioned():
     context = _snapshot()
     spec = ContractEpochSpec.create(
         session_id="s-1",
@@ -130,12 +130,19 @@ def test_sustained_contract_is_observed_but_never_autonomous():
         deadline_ticks=3600,
         context=context,
         features=ContractDifficultyFeatures(
-            product_id="iron-plate", product_tier=0, recipe_depth=1,
-            missing_technology_count=0, missing_machine_type_count=0,
-            required_new_intermediate_count=0, log_quantity=3.0,
-            deadline_ticks=3600, required_rate_per_minute=20,
-            existing_rate_per_minute=12, inventory_coverage_ratio=0,
-            estimated_power_fraction=0, transport_complexity=0,
+            product_id="iron-plate",
+            product_tier=0,
+            recipe_depth=1,
+            missing_technology_count=0,
+            missing_machine_type_count=0,
+            required_new_intermediate_count=0,
+            log_quantity=3.0,
+            deadline_ticks=3600,
+            required_rate_per_minute=20,
+            existing_rate_per_minute=12,
+            inventory_coverage_ratio=0,
+            estimated_power_fraction=0,
+            transport_complexity=0,
             stage_band=0,
         ),
         raw_difficulty=1.0,
@@ -143,68 +150,104 @@ def test_sustained_contract_is_observed_but_never_autonomous():
         effective_difficulty=1.0,
     )
     outcome = ContractEpochOutcome(
-        session_id="s-1", epoch_index=1,
-        commitment_hash=spec.commitment_hash, status="fulfilled",
-        delivered_quantity=20, requested_quantity=20,
+        session_id="s-1",
+        epoch_index=1,
+        commitment_hash=spec.commitment_hash,
+        status="fulfilled",
+        delivered_quantity=20,
+        requested_quantity=20,
         delivered_by_product={"iron-plate": 20},
-        requested_by_product={"iron-plate": 20}, completion_ratio=1.0,
-        performance_score=1.0, simulation_ticks_used=3600,
-        interventions_used=5, model_seconds=1, tool_seconds=0,
-        runner_wall_seconds=1, terminal_state_digest="after",
+        requested_by_product={"iron-plate": 20},
+        completion_ratio=1.0,
+        performance_score=1.0,
+        simulation_ticks_used=3600,
+        interventions_used=5,
+        model_seconds=1,
+        tool_seconds=0,
+        runner_wall_seconds=1,
+        terminal_state_digest="after",
     )
 
     certificate = contract_certificate(spec, outcome)
 
-    assert certificate.status == "observed_sustained"
+    assert certificate.status == "commissioned"
     assert certificate.is_autonomous is False
     assert certificate.interventions_during_window == 5
 
 
-def test_authoritative_check_promotes_sustained_contract_without_changing_score():
+def test_subthreshold_authoritative_check_does_not_promote_capability():
     context = _snapshot()
     spec = ContractEpochSpec.create(
-        session_id="s-1", epoch_index=1, template_id="test",
-        generation_seed=1, selection_seed=2, item_name="iron-plate",
-        quantity=20, order_kind="sustained", deadline_ticks=3600,
+        session_id="s-1",
+        epoch_index=1,
+        template_id="test",
+        generation_seed=1,
+        selection_seed=2,
+        item_name="iron-plate",
+        quantity=20,
+        order_kind="sustained",
+        deadline_ticks=3600,
         context=context,
         features=ContractDifficultyFeatures(
-            product_id="iron-plate", product_tier=0, recipe_depth=1,
-            missing_technology_count=0, missing_machine_type_count=0,
-            required_new_intermediate_count=0, log_quantity=3.0,
-            deadline_ticks=3600, required_rate_per_minute=20,
-            existing_rate_per_minute=12, inventory_coverage_ratio=0,
-            estimated_power_fraction=0, transport_complexity=0,
+            product_id="iron-plate",
+            product_tier=0,
+            recipe_depth=1,
+            missing_technology_count=0,
+            missing_machine_type_count=0,
+            required_new_intermediate_count=0,
+            log_quantity=3.0,
+            deadline_ticks=3600,
+            required_rate_per_minute=20,
+            existing_rate_per_minute=12,
+            inventory_coverage_ratio=0,
+            estimated_power_fraction=0,
+            transport_complexity=0,
             stage_band=0,
         ),
-        raw_difficulty=1.0, state_advantage=0.0, effective_difficulty=1.0,
+        raw_difficulty=1.0,
+        state_advantage=0.0,
+        effective_difficulty=1.0,
     )
     check = ThroughputCheckResult(
-        lease_id="lease-1", session_id="s-1", epoch_index=1,
-        authoritative=True, start_tick=3600, end_tick=7200,
-        window_ticks=3600, delivered_by_product={"iron-plate": 16},
+        lease_id="lease-1",
+        session_id="s-1",
+        epoch_index=1,
+        authoritative=True,
+        start_tick=3600,
+        end_tick=7200,
+        window_ticks=3600,
+        delivered_by_product={"iron-plate": 16},
         observed_rate_per_minute={"iron-plate": 16},
         target_rate_per_minute={"iron-plate": 20},
-        line_scores={"iron-plate": 0.8}, performance_score=0.8,
+        line_scores={"iron-plate": 0.8},
+        performance_score=0.8,
         contract_status="expired",
     )
     outcome = ContractEpochOutcome(
-        session_id="s-1", epoch_index=1,
-        commitment_hash=spec.commitment_hash, status="expired",
-        delivered_quantity=18, requested_quantity=20,
+        session_id="s-1",
+        epoch_index=1,
+        commitment_hash=spec.commitment_hash,
+        status="expired",
+        delivered_quantity=18,
+        requested_quantity=20,
         delivered_by_product={"iron-plate": 18},
-        requested_by_product={"iron-plate": 20}, completion_ratio=0.7,
-        performance_score=0.7, simulation_ticks_used=3600,
-        interventions_used=5, model_seconds=1, tool_seconds=0,
-        runner_wall_seconds=1, terminal_state_digest="after",
+        requested_by_product={"iron-plate": 20},
+        completion_ratio=0.7,
+        performance_score=0.7,
+        simulation_ticks_used=3600,
+        interventions_used=5,
+        model_seconds=1,
+        tool_seconds=0,
+        runner_wall_seconds=1,
+        terminal_state_digest="after",
         autonomous_throughput=check,
     )
 
     certificate = contract_certificate(spec, outcome)
 
     assert outcome.performance_score == 0.7
-    assert certificate.status == "autonomous"
-    assert certificate.autonomous_validation is True
-    assert certificate.observed_rate_per_minute == {"iron-plate": 16.0}
+    assert certificate.status == "commissioned"
+    assert certificate.autonomous_validation is False
     assert certificate.reliability == pytest.approx(0.7)
 
 
@@ -220,7 +263,9 @@ def test_ledger_retains_best_real_watermark_when_current_capability_shrinks():
     )
     ledger = CapabilityLedger(session_id="s-1")
     ledger.record(qualified)
-    ledger.record(commissioning_certificate(_snapshot(captured_tick=5000), product="iron-plate"))
+    ledger.record(
+        commissioning_certificate(_snapshot(captured_tick=5000), product="iron-plate")
+    )
 
     current = progress_vector(ledger)
     assert current.highest_certified_band == 0

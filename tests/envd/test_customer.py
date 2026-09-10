@@ -66,9 +66,7 @@ def test_schedule_seed_changes_the_stream():
 
 
 def test_generated_orders_are_chronological_and_valid():
-    config = ScheduleConfig(
-        horizon_ticks=1440000, difficulty=0.7, order_count=8
-    )
+    config = ScheduleConfig(horizon_ticks=1440000, difficulty=0.7, order_count=8)
     spec = generate_contract_schedule(config, seed=99)
     issues = [order.issue_tick for order in spec.orders]
     assert issues == sorted(issues)
@@ -93,9 +91,7 @@ def test_task_fingerprint_includes_customer_spec():
     )
     assert contracted.fingerprint != contracted_with_customer.fingerprint
     with pytest.raises(ValueError):
-        plain.model_validate(
-            plain.model_dump() | {"customer": {"orders": []}}
-        )
+        plain.model_validate(plain.model_dump() | {"customer": {"orders": []}})
 
 
 def test_customer_tasks_have_no_intervention_budget():
@@ -254,9 +250,7 @@ def test_steady_supply_beats_burst_for_sustained_orders():
     steady = steady_engine.evaluate(SUSTAINED_WINDOW + 1)
 
     burst_engine = ContractEngine(_spec([_sustained(total)]))
-    burst_engine.sync(
-        10, [DeliveryBucket(start_tick=0, items={"copper-cable": 400})]
-    )
+    burst_engine.sync(10, [DeliveryBucket(start_tick=0, items={"copper-cable": 400})])
     burst = burst_engine.evaluate(SUSTAINED_WINDOW + 1)
 
     assert steady.order_results[0].ratio == pytest.approx(1.0)
@@ -347,6 +341,8 @@ def test_active_sustained_order_penalizes_end_burst():
     assert telemetry["sustained_service_score"] == pytest.approx(0.25)
     assert order.student_view().remaining["iron-plate"] == 0
     assert order.student_view().completion_ratio == pytest.approx(0.25)
+    assert order.student_view().service_completion_ratio == pytest.approx(0.25)
+    assert order.student_view().throughput_certified is False
 
 
 def test_live_and_schedule_sustained_scores_match_for_adaptive_windows():
@@ -382,9 +378,9 @@ def test_live_and_schedule_sustained_scores_match_for_adaptive_windows():
     assert live.completion_ratio == pytest.approx(scheduled.ratio)
     assert scheduled.delivery_telemetry["lines"]["iron-plate"][
         "sustained_service_score"
-    ] == pytest.approx(live.delivery_telemetry["lines"]["iron-plate"][
-        "sustained_service_score"
-    ])
+    ] == pytest.approx(
+        live.delivery_telemetry["lines"]["iron-plate"]["sustained_service_score"]
+    )
 
 
 def test_low_volume_sustained_order_uses_feasible_integer_windows():
@@ -443,18 +439,12 @@ def test_reward_integral_weights_and_lateness_penalty():
         issue=0,
         due=1000,
     )
-    bad = bad.model_copy(
-        update={"weight": 3.0}
-    )
+    bad = bad.model_copy(update={"weight": 3.0})
     spec = _spec([good, bad], lateness_penalty_weight=0.5)
     engine = ContractEngine(spec)
     engine.sync(
         100,
-        [
-            DeliveryBucket(
-                start_tick=0, items={"iron-plate": 100, "steel-plate": 25}
-            )
-        ],
+        [DeliveryBucket(start_tick=0, items={"iron-plate": 100, "steel-plate": 25})],
     )
     result = engine.evaluate(2000)
     assert result.order_results[0].ratio == pytest.approx(1.0)
@@ -482,9 +472,7 @@ def test_unrevealed_orders_do_not_dilute_the_integral():
 
 
 def test_success_cannot_be_claimed_before_required_demand_is_issued():
-    future = _one_shot(
-        "future", quantity=100, issue=500000, due=600000
-    )
+    future = _one_shot("future", quantity=100, issue=500000, due=600000)
     spec = _spec([future])
     engine = ContractEngine(spec)
     result = engine.evaluate(10)
@@ -498,15 +486,11 @@ def test_success_requires_all_required_orders_met():
     unmet = _one_shot("unmet", product="steel-plate", quantity=100)
     spec = _spec([met, unmet], success_ratio=1.0)
     engine = ContractEngine(spec)
-    engine.sync(
-        10, [DeliveryBucket(start_tick=0, items={"iron-plate": 100})]
-    )
+    engine.sync(10, [DeliveryBucket(start_tick=0, items={"iron-plate": 100})])
     result = engine.evaluate(2000)
     assert success_from_evaluation(result, spec) is False
 
-    engine.sync(
-        30, [DeliveryBucket(start_tick=0, items={"steel-plate": 100})]
-    )
+    engine.sync(30, [DeliveryBucket(start_tick=0, items={"steel-plate": 100})])
     result = engine.evaluate(2000)
     assert success_from_evaluation(result, spec) is True
 
@@ -563,11 +547,7 @@ def test_mixed_products_score_per_product():
     engine = ContractEngine(_spec([order]))
     engine.sync(
         10,
-        [
-            DeliveryBucket(
-                start_tick=0, items={"iron-plate": 100, "gear": 25}
-            )
-        ],
+        [DeliveryBucket(start_tick=0, items={"iron-plate": 100, "gear": 25})],
     )
     result = engine.evaluate(20000)
     mix = result.order_results[0]
