@@ -9,18 +9,43 @@ Local session tooling (gitignored): `.runtime/play/` — `create_lease.py`,
 
 ## Incidents
 
-### 1. Camera image crash on non-cardinal directions (fixed)
+### 1. Camera image crash and generic alert icons (fixed)
 
 `GET /camera` returned `image_error: "2"` while the rest of the observation was
-healthy. Root cause: the public camera view feeds `_public_view` entities into
-the sprite renderers, whose `DIRECTIONS` maps contain only Factorio 2.0 cardinals
-(`0/4/8/12`); any other direction value (legacy 8-direction or diagonal 16-direction)
-raised `KeyError`, and the handler collapsed it to `str(exc)`.
+healthy, and every machine alert rendered as the generic yellow exclamation
+triangle instead of a real icon. Two chained defects:
 
-- Evidence: repro in `.runtime/play/repro_camera.py`; `burner_mining_drill.py:24`.
-- Fix: `fle/envd/camera.py::normalize_render_direction`, applied in
-  `FLEWorker.camera()` before `render_factory`; handler now reports
-  `type(exc).__name__` too. Unit coverage in `tests/envd/test_camera.py`.
+1. `flatten_entities` (`fle/env/tools/admin/render/utils.py`) inferred an
+   "8-direction blueprint" whenever any dict entity had direction > 6 and then
+   divided **every** dict entity direction by 2 in place. A west-facing
+   character (12) halved an east-facing drill (4 -> 2), which is not a key in
+   the renderers' `DIRECTIONS` maps, raising `KeyError`; the in-place mutation
+   also corrupted the directions seen in the camera receipt itself (the
+   `2.0`/`6.0` values observed).
+2. `_render_alert_overlays` only coerced string statuses for dict entities.
+   Camera entities become `EntityCore` objects via `flatten_entities`, so
+   `"no_fuel"` never matched `EntityStatus.NO_FUEL` and fell back to
+   `alert-warning` for every machine.
+
+Fixes:
+- `fle/commons/directions.py::normalize_render_direction` is now the single
+  normalization helper (cardinals preserved; diagonals snap to the nearest
+  cardinal; legacy index-style lists detected per batch by odd values).
+  `flatten_entities` uses it and no longer mutates its inputs.
+- `_render_alert_overlays` coerces string statuses on the object path too.
+- `fle/envd/camera.py` normalizes camera entity directions before rendering and
+  reports `type(exc).__name__` in `image_error`.
+
+Result: real alert assets now render per status (`no_fuel` -> red fuel-pump
+alert, `no_ingredients` -> yellow gear alert, power/fluid/storage alerts
+available). Unit coverage in `tests/test_render_direction_normalization.py`
+and `tests/envd/test_camera.py`; live verification via
+`.runtime/play/verify_camera_fix.py`.
+
+Open follow-up: Lua-rendered entities still carry raw integer `status` codes,
+which do not match the string-valued `EntityStatus` enum; those keep the
+generic warning until a code mapping (or a status string in the render
+payload) exists.
 
 ### 2. Direct `FactorioInstance` attach resets the live world (open)
 

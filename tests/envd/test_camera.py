@@ -102,7 +102,7 @@ def test_render_direction_normalization_accepts_every_encoding():
     assert normalize_render_direction(4) == 4
     assert normalize_render_direction(12.0) == 12
     assert normalize_render_direction(2) == 4
-    assert normalize_render_direction(6) == 12
+    assert normalize_render_direction(6) == 8
     assert normalize_render_direction(14) == 0
     assert normalize_render_direction(None) == 0
     assert normalize_render_direction("junk") == 0
@@ -134,7 +134,7 @@ def test_camera_normalizes_entity_directions_before_rendering():
     worker.render_factory = fake_render
     result = worker.camera("lease")
     directions = [entity["direction"] for entity in captured["camera_entities"]]
-    assert directions == [4, 12, 0]
+    assert directions == [4, 8, 0]
     assert "image_error" not in result
 
 

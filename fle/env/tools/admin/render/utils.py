@@ -15,6 +15,7 @@ from fle.env import (
     ElectricityGroup,
     EntityCore,
 )
+from fle.commons.directions import normalize_render_direction
 from .constants import (
     DEFAULT_MAX_RESOURCE_AMOUNT,
     MIN_RESOURCE_VOLUME,
@@ -26,30 +27,27 @@ from .constants import (
 def flatten_entities(
     entities: List[Union[Dict, Entity, EntityGroup]],
 ) -> List[Union[Entity, EntityCore]]:
-    # Sometimes directions are 0-12
-    max_direction = 0
+    # Factorio 2.0 uses 16-direction values (even, 0-14); legacy index-style
+    # payloads use 0-7 and are the only source of odd direction values.
+    dict_directions: List[int] = []
     for entity in entities:
-        if isinstance(entity, dict):
-            if "direction" not in entity:
-                entity["direction"] = 0
-            direction = entity["direction"] if "direction" in entity else 0
-            if direction > max_direction:
-                max_direction = direction
+        if not isinstance(entity, dict):
+            continue
+        try:
+            dict_directions.append(int(entity.get("direction") or 0))
+        except (TypeError, ValueError):
+            dict_directions.append(0)
+    index_direction = any(direction % 2 == 1 for direction in dict_directions)
 
     for entity in entities:
         if isinstance(entity, dict):
-            # if entity["name"] == "character":
-            #    continue
-
             try:
-                # Sigh. Some blueprints are 0-12.
-                entity["direction"] = (
-                    entity["direction"] / 2
-                    if max_direction > 6
-                    else entity["direction"]
+                normalized = dict(entity)
+                normalized["direction"] = normalize_render_direction(
+                    normalized.get("direction"),
+                    index_direction=index_direction,
                 )
-
-                yield EntityCore(**entity)
+                yield EntityCore(**normalized)
             except Exception:
                 pass
         elif isinstance(entity, EntityGroup):
@@ -182,7 +180,11 @@ def is_tree_entity(entity_name: str) -> bool:
 
 
 def is_rock_entity(entity_name: str) -> bool:
-    return "rock-" in entity_name or entity_name in {"big-rock", "huge-rock", "big-sand-rock"}
+    return "rock-" in entity_name or entity_name in {
+        "big-rock",
+        "huge-rock",
+        "big-sand-rock",
+    }
 
 
 def parse_blueprint(blueprint_string: str) -> Dict:

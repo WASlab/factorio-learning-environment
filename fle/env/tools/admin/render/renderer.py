@@ -276,6 +276,8 @@ class Renderer:
                 continue
             if hasattr(entity, "status"):
                 status = entity.status
+                if isinstance(status, str):
+                    status = EntityStatus.from_string(status)
                 entity_dict = (
                     entity.model_dump()
                     if hasattr(entity, "model_dump")
