@@ -47,6 +47,38 @@ which do not match the string-valued `EntityStatus` enum; those keep the
 generic warning until a code mapping (or a status string in the render
 payload) exists.
 
+#### Consideration: integer-status mapping for `factorio_render_factory`
+
+Arguments in favour of adding it:
+
+- The standalone render tool is an agent-facing primitive; an unfueled drill
+  should read as a red fuel alert there too, not just in the persistent camera.
+- One behaviour everywhere: agents that call `factorio_render_factory` directly
+  (including non-camera profiles) currently get lower-fidelity alerts than
+  camera consumers.
+- The mapping is small and deterministic; it can be unit-tested against the
+  same status names the camera path already produces, keeping both paths in
+  sync.
+
+Arguments against (or for a different fix):
+
+- `EntityStatus.from_int` enumerates enum order, not Factorio's
+  `defines.entity_status` codes; a hand-maintained numeric table silently
+  mis-maps when Factorio reorders or extends statuses — a wrong icon is worse
+  than the generic fallback.
+- The render Lua already has the status entity; emitting the status *name*
+  (as `public_view` does via `entity_status_names`) removes the need for a
+  Python-side code table and is testable at the boundary.
+- A warnings-string fallback ("out of fuel", "no ingredients", ...) would
+  cover unknown statuses without coupling to engine constants.
+- Cost: every Lua entity payload grows slightly (status name vs int), and the
+  renderer change is in a hot path for large factories.
+
+Suggested direction: prefer teaching the render payload to emit status names
+(or a shared code->name map generated from game data) over a hand-written
+integer table; whichever is chosen, cover it with a unit test that enumerates
+all statuses so drift is caught.
+
 ### 2. Direct `FactorioInstance` attach resets the live world (open)
 
 Constructing `FactorioInstance` calls `initialise(..., clear_entities=True)` in
