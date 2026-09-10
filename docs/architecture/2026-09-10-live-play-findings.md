@@ -112,14 +112,37 @@ features too") but never sends it.
   ("Could not find a valid stone-furnace entity containing iron-plate") rather
   than a typed empty-output result.
 
-### 5. Drill output / ground-item trap (observed once, unresolved)
+### 5. Burner drill cannot feed an adjacent stone furnace (open; chest workaround)
 
-A mining drill that dropped one ore before its sink existed reported
-`output blocked by item on the ground. There is no sink entity in place to
-accept the output.` Replacing the furnace did not clear it immediately, and
-walking the tile did not show the item in inventory. Whether a ground item
-persisted under the re-placed furnace was not conclusively established. No
-primitive exists for picking up ground items.
+The canonical early-game layout (burner mining drill facing a directly adjacent
+stone furnace) does not transfer items on this build. This supersedes the
+earlier "ground-item trap" guess: the warning was the same in both sessions and
+the cause is geometric.
+
+- Engine truth (RCON): drill at `(-18,-49)` facing east has
+  `drop_position = (-16.703125, -49.5)`; the furnace at `(-16,-49)` has
+  `bounding_box = (-16.69921875, -49.69921875)..(-15.30078125, -48.30078125)`.
+  The drop point misses the collision box by `0.00390625` tiles, so the engine
+  reports `output blocked by item on the ground. There is no sink entity in
+  place to accept the output.` while the furnace is visibly adjacent.
+- FLE's own serialization rounds the drop to `(-16.5, -49.5)` and lists the
+  furnace under `neighbours`, so structured diagnostics look healthy and hide
+  the cause.
+- Workaround that works: a **wooden chest at the drop tile**
+  (`place_entity(Prototype.WoodenChest, position=Position(-16.5, -49.5))`) is
+  accepted as the sink; the warning clears and ore accumulates in the chest.
+  `extract_item` from the chest works; ore can then be hand-fed to a furnace.
+- Implication: direct drill -> furnace automation needs a chest/inserter hop,
+  or a corrected sink placement offset. Worth testing whether a half-tile
+  furnace offset or a different sink entity restores direct feed.
+
+### 6. Crafting is asynchronous and placement needs the finished item
+
+`queue_craft(Prototype.WoodenChest, quantity=1)` returns a structured craft
+handle (`handle`, `queued`, `queued_crafts`, `partial`, `tick`) but the item is
+not in inventory until the craft completes; an immediate `place_entity` fails
+with "No wooden_chest in inventory". `get_craft_queue()` shows the active
+queue, and the same placement succeeds after a short `wait`.
 
 ## Primitive feedback (training/eval relevance)
 
@@ -135,5 +158,12 @@ primitive exists for picking up ground items.
 
 ## Session state
 
-- World wiped by incident 2; re-leased fresh freeplay after the camera fix.
-- Camera fix commit: `fle/envd` + tests (see git log for the session).
+- Camera + alert fixes committed (`e8634dba`, `faf08349`) and verified live.
+- Fresh envd + freeplay lease after the last restart; observer connected.
+- Progress: reclaimed verification drill; harvested 20 wood; burner drill on
+  the iron patch at `(-18,-49)` feeding a chest at `(-16.5,-49.5)`; stone
+  furnace at `(-14,-49)` smelting hand-fed ore (iron-plate recipe active).
+- Next: coal run (40,-82) for sustained fuel, more drills/furnaces, and a
+  burner-inserter hop from chest to furnace; then automation science and the
+  technology milestones.
+
