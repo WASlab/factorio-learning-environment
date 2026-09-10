@@ -63,24 +63,6 @@ def test_get_stone_furnace(game):
     assert retrieved_furnace.fuel.get(Prototype.Coal, 0) < 5, "Failed to consume coal"
 
 
-def test_get_connected_transport_belts(game):
-    """
-    Test to ensure that the inventory of a stone furnace is correctly updated after smelting iron ore
-    :param game:
-    :return:
-    """
-    start_position = game.nearest(Resource.Stone)
-    end_position = game.nearest(Resource.IronOre)
-
-    game.connect_entities(
-        start_position, end_position, connection_type=Prototype.TransportBelt
-    )
-
-    transport_belts = game.get_entities({Prototype.TransportBelt}, start_position)
-
-    assert len(transport_belts) == 1, "Failed to retrieve transport belts"
-
-
 def test_get_entities_bug(game):
     # Check initial inventory
     iron_position = game.nearest(Resource.Stone)
@@ -357,21 +339,6 @@ def test_enhanced_grouping_vs_individual_logic(game):
         {Prototype.SmallElectricPole}, position=pole1.position
     )
     assert len(poles_with_position) > 0, "Should find poles with position filter"
-
-    # Test 3: Request no specific entities (get all) - should group everything
-    all_entities = game.get_entities()
-    grouped_count = sum(
-        1
-        for e in all_entities
-        if hasattr(e, "__class__")
-        and e.__class__.__name__ in ["ElectricityGroup", "BeltGroup", "PipeGroup"]
-    )
-
-    assert grouped_count >= 0, "Should have some grouped entities when getting all"
-
-    print(
-        f"✓ Enhanced grouping logic working - found {grouped_count} groups in get_entities()"
-    )
 
 
 def test_individual_belt_extraction_without_position(game):

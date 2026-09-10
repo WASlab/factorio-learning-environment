@@ -119,58 +119,58 @@ def setup_processing_building(
     return building, requirements
 
 
-def test_coal_liquefaction(game):
-    recipe_setup(game, [RecipeName.CoalLiquefaction], Prototype.OilRefinery)
-    # recipe_setup(game, [RecipeName.CoalLiquefaction], Prototype.OilRefinery, Direction.UP)
-    # AWrecipe_setup(game, [RecipeName.CoalLiquefaction], Prototype.OilRefinery, Direction.RIGHT)
-
-
-def test_advanced_oil_processing(game):
-    recipe_setup(game, [RecipeName.AdvancedOilProcessing], Prototype.OilRefinery)
-
-
-def test_basic_oil_processing(game):
-    recipe_setup(game, [RecipeName.BasicOilProcessing], Prototype.OilRefinery)
-
-
-def test_sulfuric_acid_production(game):
-    recipe_setup(game, [RecipeName.SulfuricAcid], Prototype.ChemicalPlant)
-
-
-def test_heavy_oil_cracking(game):
-    recipe_setup(game, [RecipeName.HeavyOilCracking], Prototype.ChemicalPlant)
-
-
-def test_light_oil_cracking(game):
-    recipe_setup(game, [RecipeName.LightOilCracking], Prototype.ChemicalPlant)
-
-
-def test_solid_fuel_from_light_oil(game):
-    recipe_setup(game, [RecipeName.SolidFuelFromLightOil], Prototype.ChemicalPlant)
-
-
-def test_solid_fuel_from_heavy_oil(game):
-    recipe_setup(game, [RecipeName.SolidFuelFromHeavyOil], Prototype.ChemicalPlant)
-
-
-def test_solid_fuel_from_petroleum_gas(game):
-    recipe_setup(game, [RecipeName.SolidFuelFromPetroleumGas], Prototype.ChemicalPlant)
-
-
-def test_lubricant(game):
-    recipe_setup(game, [Prototype.Lubricant], Prototype.ChemicalPlant)
-
-
-def test_sulfur(game):
-    recipe_setup(game, [Prototype.Sulfur], Prototype.ChemicalPlant)
-
-
-def test_plastic_bar(game):
-    recipe_setup(game, [Prototype.PlasticBar], Prototype.ChemicalPlant)
-
-
-def test_battery(game):
-    recipe_setup(game, [Prototype.Battery], Prototype.ChemicalPlant)
+@pytest.mark.parametrize(
+    "recipe,prototype",
+    [
+        pytest.param(
+            RecipeName.CoalLiquefaction, Prototype.OilRefinery, id="coal-liquefaction"
+        ),
+        pytest.param(
+            RecipeName.AdvancedOilProcessing,
+            Prototype.OilRefinery,
+            id="advanced-oil-processing",
+        ),
+        pytest.param(
+            RecipeName.BasicOilProcessing,
+            Prototype.OilRefinery,
+            id="basic-oil-processing",
+        ),
+        pytest.param(
+            RecipeName.SulfuricAcid, Prototype.ChemicalPlant, id="sulfuric-acid"
+        ),
+        pytest.param(
+            RecipeName.HeavyOilCracking,
+            Prototype.ChemicalPlant,
+            id="heavy-oil-cracking",
+        ),
+        pytest.param(
+            RecipeName.LightOilCracking,
+            Prototype.ChemicalPlant,
+            id="light-oil-cracking",
+        ),
+        pytest.param(
+            RecipeName.SolidFuelFromLightOil,
+            Prototype.ChemicalPlant,
+            id="solid-fuel-from-light-oil",
+        ),
+        pytest.param(
+            RecipeName.SolidFuelFromHeavyOil,
+            Prototype.ChemicalPlant,
+            id="solid-fuel-from-heavy-oil",
+        ),
+        pytest.param(
+            RecipeName.SolidFuelFromPetroleumGas,
+            Prototype.ChemicalPlant,
+            id="solid-fuel-from-petroleum-gas",
+        ),
+        pytest.param(Prototype.Lubricant, Prototype.ChemicalPlant, id="lubricant"),
+        pytest.param(Prototype.Sulfur, Prototype.ChemicalPlant, id="sulfur"),
+        pytest.param(Prototype.PlasticBar, Prototype.ChemicalPlant, id="plastic-bar"),
+        pytest.param(Prototype.Battery, Prototype.ChemicalPlant, id="battery"),
+    ],
+)
+def test_recipe_setup(game, recipe, prototype):
+    recipe_setup(game, [recipe], prototype)
 
 
 def test_end_to_end_lubricant_tanks(game):

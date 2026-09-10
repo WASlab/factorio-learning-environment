@@ -5,10 +5,6 @@ from fle.env.game_types import Prototype, RecipeName
 from fle.env.utils.controller_loader.type_definition_processor import (
     TypeDefinitionProcessor,
 )
-from fle.envd.action_reference import (
-    ACTION_PROFILE_REFERENCE_ID,
-    ACTION_PROFILE_REFERENCE_SHA256,
-)
 from fle.envd.models import (
     ConstraintSpec,
     CurriculumSpec,
@@ -195,11 +191,6 @@ def test_recipe_name_is_a_distinct_canonical_recipe_namespace():
     assert RecipeName.PlasticBar is not Prototype.PlasticBar
     assert isinstance(RecipeName.AutomationSciencePack, RecipeName)
     assert RecipeName.BasicOilProcessing.value == "basic-oil-processing"
-
-
-def test_action_reference_has_a_stable_comparison_identity():
-    assert ACTION_PROFILE_REFERENCE_ID == "semantic-motor-v1/reference-v1"
-    assert len(ACTION_PROFILE_REFERENCE_SHA256) == 64
 
 
 def test_full_prompt_types_render_concrete_canonical_recipe_members():

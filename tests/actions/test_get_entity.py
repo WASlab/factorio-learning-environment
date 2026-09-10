@@ -1,7 +1,7 @@
 import pytest
 
 from fle.env import DirectionInternal
-from fle.env.entities import Furnace, Position
+from fle.env.entities import Position
 from fle.env.game_types import Prototype, RecipeName, Resource
 
 
@@ -60,41 +60,6 @@ def test_get_offshore_pump(game):
     assert boiler.fluid_box, "Failed to get water"
 
 
-def test_get_stone_furnace(game):
-    """
-    Test to ensure that the inventory of a stone furnace is correctly updated after smelting iron ore
-    :param game:
-    :return:
-    """
-    # Check initial inventory
-    position = game.nearest(Resource.Stone)
-    game.move_to(position)
-    # 1. Place a stone furnace
-    stone_furnace = game.place_entity(
-        Prototype.StoneFurnace, DirectionInternal.UP, position
-    )
-    assert stone_furnace is not None, "Failed to place stone furnace"
-    assert stone_furnace.warnings == ["out of fuel", "no ingredients to smelt"], (
-        "Failed to place stone furnace"
-    )
-
-    game.insert_item(Prototype.Coal, stone_furnace, 5)
-    game.insert_item(Prototype.IronOre, stone_furnace, 5)
-    game.sleep(5)
-    retrieved_furnace: Furnace = game.get_entity(
-        Prototype.StoneFurnace, stone_furnace.position
-    )
-
-    assert retrieved_furnace is not None, "Failed to retrieve stone furnace"
-    assert retrieved_furnace.furnace_result.get(Prototype.IronPlate, 0) > 0, (
-        "Failed to smelt iron plate"
-    )
-    assert retrieved_furnace.furnace_source.get(Prototype.IronOre, 0) < 5, (
-        "Failed to smelt iron ore"
-    )
-    assert retrieved_furnace.fuel.get(Prototype.Coal, 0) < 5, "Failed to consume coal"
-
-
 def test_get_mining_drill(game):
     """
     Test to ensure that the inventory of a mining drill is correctly updated after mining iron ore
@@ -119,150 +84,84 @@ def test_get_mining_drill(game):
     assert retrieved_drill.fuel.get(Prototype.Coal, 0) < 5, "Failed to burn fuel"
 
 
-def test_get_iron_chest(game):
+@pytest.mark.parametrize(
+    "prototype,position,recipe,crafts,insertions,expected_inventory",
+    [
+        pytest.param(
+            Prototype.IronChest,
+            Position(x=3, y=0),
+            None,
+            [],
+            [(Prototype.Coal, 5), (Prototype.IronPlate, 5)],
+            [("inventory", Prototype.Coal, 5), ("inventory", Prototype.IronPlate, 5)],
+            id="iron-chest",
+        ),
+        pytest.param(
+            Prototype.AssemblingMachine1,
+            Position(x=5, y=0),
+            RecipeName.IronGearWheel,
+            [(Prototype.IronGearWheel, 5)],
+            [(Prototype.IronPlate, 5), (Prototype.IronGearWheel, 5)],
+            [
+                ("assembling_machine_input", Prototype.IronPlate, 5),
+                ("assembling_machine_output", Prototype.IronGearWheel, 5),
+            ],
+            id="assembling-machine",
+        ),
+        pytest.param(
+            Prototype.Lab,
+            Position(x=5, y=0),
+            None,
+            [],
+            [(Prototype.AutomationSciencePack, 1)],
+            [("lab_input", Prototype.AutomationSciencePack, 1)],
+            id="lab",
+        ),
+        pytest.param(
+            Prototype.GunTurret,
+            Position(x=3, y=0),
+            None,
+            [],
+            [(Prototype.FirearmMagazine, 5)],
+            [("turret_ammo", Prototype.FirearmMagazine, 5)],
+            id="turret",
+        ),
+        pytest.param(
+            Prototype.Boiler,
+            Position(x=5, y=0),
+            None,
+            [],
+            [(Prototype.Coal, 5)],
+            [("fuel", Prototype.Coal, 5)],
+            id="boiler",
+        ),
+    ],
+)
+def test_get_entity_inventory(
+    game, prototype, position, recipe, crafts, insertions, expected_inventory
+):
     """
-    Test to ensure that the inventory of an iron chest is correctly updated after inserting items
+    Test that an entity's inventory is correctly reported via get_entity after inserting items
     :param game:
     :return:
     """
     # Check initial inventory
     inventory = game.inspect_inventory()
-    iron_chest_count = inventory.get(Prototype.IronChest, 0)
-    assert iron_chest_count != 0, "Failed to get iron chest count"
+    assert inventory.get(prototype, 0) != 0, f"Failed to get {prototype} count"
 
     # Place entity away from player origin (0,0) to avoid collision
-    iron_chest = game.place_entity(Prototype.IronChest, position=Position(x=3, y=0))
-    game.insert_item(Prototype.Coal, iron_chest, quantity=5)
-    game.insert_item(Prototype.IronPlate, iron_chest, quantity=5)
+    entity = game.place_entity(prototype, position=position)
+    if recipe is not None:
+        game.set_entity_recipe(entity, recipe)
+    for item, quantity in crafts:
+        game.craft_item(item, quantity)
+    for item, quantity in insertions:
+        game.insert_item(item, entity, quantity=quantity)
 
-    retrieved_chest = game.get_entity(Prototype.IronChest, iron_chest.position)
+    retrieved = game.get_entity(prototype, entity.position)
 
-    assert retrieved_chest is not None, "Failed to retrieve iron chest"
-    assert retrieved_chest.inventory.get(Prototype.Coal, 0) == 5, (
-        "Failed to insert coal"
-    )
-    assert retrieved_chest.inventory.get(Prototype.IronPlate, 0) == 5, (
-        "Failed to insert iron plate"
-    )
-
-
-def test_get_assembling_machine(game):
-    """
-    Test to ensure that the inventory of an assembling machine is correctly updated after crafting items
-    :param game:
-    :return:
-    """
-    # Check initial inventory
-    inventory = game.inspect_inventory()
-    assembling_machine_count = inventory.get(Prototype.AssemblingMachine1, 0)
-    assert assembling_machine_count != 0, "Failed to get assembling machine count"
-
-    # Place entity away from player origin (0,0) to avoid collision
-    assembling_machine = game.place_entity(
-        Prototype.AssemblingMachine1, position=Position(x=5, y=0)
-    )
-    game.set_entity_recipe(assembling_machine, RecipeName.IronGearWheel)
-    game.insert_item(Prototype.IronPlate, assembling_machine, quantity=5)
-    game.craft_item(Prototype.IronGearWheel, 5)
-    game.insert_item(Prototype.IronGearWheel, assembling_machine, quantity=5)
-
-    retrieved_machine = game.get_entity(
-        Prototype.AssemblingMachine1, assembling_machine.position
-    )
-
-    assert retrieved_machine is not None, "Failed to retrieve assembling machine"
-    assert (
-        retrieved_machine.assembling_machine_output.get(Prototype.IronGearWheel, 0) == 5
-    ), "Failed to get output inventory"
-    assert (
-        retrieved_machine.assembling_machine_input.get(Prototype.IronPlate, 0) == 5
-    ), "Failed to consume input inventory"
-
-
-def test_get_lab(game):
-    """
-    Test to ensure that the inventory of a lab is correctly updated after researching a science pack
-    :param game:
-    :return:
-    """
-    # Check initial inventory
-    inventory = game.inspect_inventory()
-    lab_count = inventory.get(Prototype.Lab, 0)
-    assert lab_count != 0, "Failed to get lab count"
-
-    # Place entity away from player origin (0,0) to avoid collision
-    lab = game.place_entity(Prototype.Lab, position=Position(x=5, y=0))
-    game.insert_item(Prototype.AutomationSciencePack, lab, quantity=1)
-    retrieved_lab = game.get_entity(Prototype.Lab, lab.position)
-
-    assert retrieved_lab is not None, "Failed to retrieve lab"
-    assert retrieved_lab.lab_input.get(Prototype.AutomationSciencePack, 0) == 1, (
-        "Failed to consume science pack"
-    )
-
-
-def test_get_turret(game):
-    """
-    Test to ensure that the inventory of a turret is correctly updated after shooting a target
-    :param game:
-    :return:
-    """
-    # Check initial inventory
-    inventory = game.inspect_inventory()
-    turret_count = inventory.get(Prototype.GunTurret, 0)
-    assert turret_count != 0, "Failed to get turret count"
-
-    # Place entity away from player origin (0,0) to avoid collision
-    turret = game.place_entity(Prototype.GunTurret, position=Position(x=3, y=0))
-    game.insert_item(Prototype.FirearmMagazine, turret, quantity=5)
-    retrieved_turret = game.get_entity(Prototype.GunTurret, turret.position)
-
-    assert retrieved_turret is not None, "Failed to retrieve turret"
-    assert retrieved_turret.turret_ammo.get(Prototype.FirearmMagazine, 0) == 5, (
-        "Failed to consume ammo"
-    )
-
-
-def test_get_boiler(game):
-    """
-    Test to ensure that the inventory of a boiler is correctly updated after burning fuel
-    :param game:
-    :return:
-    """
-    # Check initial inventory
-    inventory = game.inspect_inventory()
-    boiler_count = inventory.get(Prototype.Boiler, 0)
-    assert boiler_count != 0, "Failed to get boiler count"
-
-    # Place entity away from player origin (0,0) to avoid collision
-    boiler = game.place_entity(Prototype.Boiler, position=Position(x=5, y=0))
-    game.insert_item(Prototype.Coal, boiler, quantity=5)
-    retrieved_boiler = game.get_entity(Prototype.Boiler, boiler.position)
-
-    assert retrieved_boiler is not None, "Failed to retrieve boiler"
-    assert retrieved_boiler.fuel.get(Prototype.Coal, 0) == 5, "Failed to consume fuel"
-
-
-def test_get_assembling_machine_1(game):
-    """
-    Test to ensure that the inventory of an assembling machine is correctly updated after crafting items
-    :param game:
-    :return:
-    """
-    # Check initial inventory
-    inventory = game.inspect_inventory()
-    assembling_machine_count = inventory.get(Prototype.AssemblingMachine1, 0)
-    assert assembling_machine_count != 0, "Failed to get assembling machine count"
-
-    # Place entity away from player origin (0,0) to avoid collision
-    assembling_machine = game.place_entity(
-        Prototype.AssemblingMachine1, position=Position(x=5, y=0)
-    )
-    game.set_entity_recipe(assembling_machine, RecipeName.IronGearWheel)
-    game.insert_item(Prototype.IronPlate, assembling_machine, quantity=5)
-
-    retrieved_machine = game.get_entity(
-        Prototype.AssemblingMachine1, assembling_machine.position
-    )
-
-    assert retrieved_machine is not None, "Failed to retrieve assembling machine"
+    assert retrieved is not None, f"Failed to retrieve {prototype}"
+    for attr, item, quantity in expected_inventory:
+        assert getattr(retrieved, attr).get(item, 0) == quantity, (
+            f"Failed to insert {item} into {prototype} {attr}"
+        )

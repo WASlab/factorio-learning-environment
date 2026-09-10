@@ -52,21 +52,11 @@ def test_nearest_buildable_near_water(game):
     steam_engine_position = buildable_area.center
     game.move_to(steam_engine_position.right(5))
 
-    game.place_entity(
+    steam_engine = game.place_entity(
         Prototype.SteamEngine, direction=Direction.RIGHT, position=steam_engine_position
     )
 
-    assert True, "The steam engine should be placeable due to the bounding box"
-
-
-def test_nearest_buildable_prototype_dimensions(game):
-    """
-    Test finding a buildable position for an entity with prototype dimensions.
-    """
-    offshore_pump_box = BuildingBox(  # noqa
-        width=Prototype.OffshorePump.WIDTH, height=Prototype.OffshorePump.HEIGHT
-    )
-    assert True
+    assert steam_engine, "The steam engine should be placeable due to the bounding box"
 
 
 def test_nearest_buildable_mining_drill(game):
@@ -121,12 +111,13 @@ def test_nearest_buildable_invalid_position(game):
 
     # Attempt to find position for an entity with impossible bounding box
     with pytest.raises(Exception) as exc_info:
-        boundingbox_coords = game.nearest_buildable(  # noqa
+        game.nearest_buildable(
             Prototype.BurnerMiningDrill,
             drill_box,
             center_position=game.nearest(Resource.CopperOre),
         )
-        assert "Could not find a buildable position" in str(exc_info.value)
+
+    assert "Could not find a buildable position" in str(exc_info.value)
 
 
 def test_nearest_buildable_multiple_entities(game):

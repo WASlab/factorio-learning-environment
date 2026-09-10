@@ -356,21 +356,29 @@ def test_capture_preserves_delivery_telemetry_and_separates_factory_target_band(
     assert features.existing_delivery_rate_per_minute == pytest.approx(120.0)
 
 
-def test_window_rate_has_no_rate_for_a_single_cumulative_sample():
-    assert _window_rate([(1000, {"iron-plate": 10_000.0})], 3600) == {}
-
-
-def test_window_rate_uses_oldest_short_history_sample():
-    rates = _window_rate(
-        [
-            (1000, {"iron-plate": 1000.0}),
-            (1600, {"iron-plate": 1100.0}),
-        ],
-        3600,
-    )
-    # 100 plates over ten seconds is 600 plates/minute, not a cumulative
-    # total divided by epsilon.
-    assert rates["iron-plate"] == pytest.approx(600.0, abs=0.01)
+@pytest.mark.parametrize(
+    ("history", "expected_rates"),
+    [
+        pytest.param(
+            [(1000, {"iron-plate": 10_000.0})],
+            {},
+            id="single_cumulative_sample_has_no_rate",
+        ),
+        pytest.param(
+            [
+                (1000, {"iron-plate": 1000.0}),
+                (1600, {"iron-plate": 1100.0}),
+            ],
+            {"iron-plate": 600.0},
+            id="short_history_uses_oldest_sample",
+        ),
+    ],
+)
+def test_window_rate_edge_cases(history, expected_rates):
+    rates = _window_rate(history, 3600)
+    assert set(rates) == set(expected_rates)
+    for item, expected in expected_rates.items():
+        assert rates[item] == pytest.approx(expected, abs=0.01)
 
 
 # ---------------------------------------------------------------------------

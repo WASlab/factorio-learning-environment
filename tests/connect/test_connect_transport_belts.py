@@ -445,24 +445,6 @@ def test_no_broken_edges(game):
 
 
 def test_connecting_transport_belts_around_sharp_edges(game):
-    water_patch: ResourcePatch = game.get_resource_patch(
-        Resource.Water, game.nearest(Resource.Water)
-    )
-
-    # move to the water patch
-    game.move_to(water_patch.bounding_box.left_top)
-
-    # connect transport belts around the water patch
-    belts = game.connect_entities(
-        water_patch.bounding_box.left_top,
-        water_patch.bounding_box.right_bottom,
-        connection_type=Prototype.TransportBelt,
-    )
-
-    assert belts, "Failed to connect transport belts around the water patch"
-
-
-def test_connecting_transport_belts_around_sharp_edges2(game):
     iron_patch: ResourcePatch = game.get_resource_patch(
         Resource.IronOre, game.nearest(Resource.IronOre)
     )
@@ -499,147 +481,36 @@ def test_connecting_transport_belts_around_sharp_edges2(game):
         game.instance.reset()
 
 
-def test_connect_belt_groups_horizontally(game):
-    # Create a horizontal belt group
-    belt_group_right = game.connect_entities(
-        Position(x=0, y=0), Position(x=5, y=0), Prototype.TransportBelt
-    )
-
-    # Loop the belt back around
-    belt_group_right = game.connect_entities(
-        belt_group_right, belt_group_right, Prototype.TransportBelt
-    )
-
-    # This should result in a single contiguous group
-    assert belt_group_right
-
-    belt_group_left = game.connect_entities(
-        Position(x=0, y=-10), Position(x=-5, y=-10), Prototype.TransportBelt
-    )
-
-    # Loop the belt back around
-    belt_group_left = game.connect_entities(
-        belt_group_left, belt_group_left, Prototype.TransportBelt
-    )
-
-    # This should result in a single contiguous group
-    assert belt_group_left
-
-
-def test_connect_belt_groups_vertically(game):
-    # Create a vertical belt group
-    belt_group_down = game.connect_entities(
-        Position(x=0, y=0), Position(x=0, y=5), Prototype.TransportBelt
-    )
-
-    # Loop the belt back around
-    belt_group_down = game.connect_entities(
-        belt_group_down, belt_group_down, Prototype.TransportBelt
-    )
-
-    # This should result in a single contiguous group
-    assert belt_group_down
-    assert len(belt_group_down.inputs) == 0
-    assert len(belt_group_down.outputs) == 0
-
-    belt_group_up = game.connect_entities(
-        Position(x=-2, y=0), Position(x=-2, y=-5), Prototype.TransportBelt
-    )
-
-    # Loop the belt back around
-    belt_group_up = game.connect_entities(
-        belt_group_up, belt_group_up, Prototype.TransportBelt
-    )
-
-    # This should result in a single contiguous group
-    assert belt_group_up
-    assert len(belt_group_up.inputs) == 0
-    assert len(belt_group_up.outputs) == 0
-
-
-def test_connect_belt_groups_diagonally(game):
-    belt_group_up_left = game.connect_entities(
-        Position(x=0, y=0), Position(x=-5, y=-5), Prototype.TransportBelt
-    )
-
-    # Loop the belt back around
-    belt_group_up_left = game.connect_entities(
-        belt_group_up_left, belt_group_up_left, Prototype.TransportBelt
-    )
-
-    # This should result in a single contiguous group
-    assert belt_group_up_left
-    assert len(belt_group_up_left.inputs) == 0
-    assert len(belt_group_up_left.outputs) == 0
-
-
-def test_connect_belt_groups_into_a_square(game):
-    # Create a square belt group
+@pytest.mark.parametrize(
+    "waypoints,expected_inputs,expected_outputs",
+    [
+        pytest.param([(0, 0), (5, 0), (0, 0)], None, None, id="horizontal-loop"),
+        pytest.param([(0, 0), (0, 5), (0, 0)], None, None, id="vertical-loop"),
+        pytest.param([(0, 0), (-5, -5), (0, 0)], None, None, id="diagonal-loop"),
+        pytest.param(
+            [(0, 0), (5, 0), (5, 5), (0, 5), (0, 0)], 1, 1, id="square-waypoints"
+        ),
+        pytest.param(
+            [(0, 0), (5, 0), (7, 2), (7, 5), (5, 7), (0, 7), (-2, 5), (-2, 2), (0, 0)],
+            None,
+            None,
+            id="octagon-loop",
+        ),
+    ],
+)
+def test_connect_belt_groups_loop_closure(
+    game, waypoints, expected_inputs, expected_outputs
+):
+    """Belt groups closed back onto themselves form a single contiguous loop"""
     belt_group = game.connect_entities(
-        Position(x=0, y=0), Position(x=5, y=0), Prototype.TransportBelt
+        *[Position(x=x, y=y) for x, y in waypoints], Prototype.TransportBelt
     )
-    belt_group = game.connect_entities(
-        belt_group, Position(x=5, y=5), Prototype.TransportBelt
-    )
-    belt_group = game.connect_entities(
-        belt_group, Position(x=0, y=5), Prototype.TransportBelt
-    )
-    belt_group = game.connect_entities(belt_group, belt_group, Prototype.TransportBelt)
 
-    # This should result in a single contiguous group
     assert belt_group
-    assert len(belt_group.inputs) == 0
-    assert len(belt_group.outputs) == 0
-
-
-def test_connect_belt_groups_into_a_square_waypoints(game):
-    # Create a square belt group
-    belt_group = game.connect_entities(
-        Position(x=0, y=0),
-        Position(x=5, y=0),
-        Position(x=5, y=5),
-        Position(x=0, y=5),
-        Position(x=0, y=0),
-        Prototype.TransportBelt,
-    )
-    # This should result in a single contiguous group
-    assert belt_group
-    assert len(belt_group.inputs) == 1
-    assert len(belt_group.outputs) == 1
-
-
-def test_connect_belt_groups_into_an_octagon(game):
-    # Create an octagon belt group
-    belt_group = game.connect_entities(
-        Position(x=0, y=0), Position(x=5, y=0), Prototype.TransportBelt
-    )
-    belt_group = game.connect_entities(
-        belt_group, Position(x=7, y=2), Prototype.TransportBelt
-    )
-    belt_group = game.connect_entities(
-        belt_group, Position(x=7, y=5), Prototype.TransportBelt
-    )
-    belt_group = game.connect_entities(
-        belt_group, Position(x=5, y=7), Prototype.TransportBelt
-    )
-    belt_group = game.connect_entities(
-        belt_group, Position(x=0, y=7), Prototype.TransportBelt
-    )
-    belt_group = game.connect_entities(
-        belt_group, Position(x=-2, y=5), Prototype.TransportBelt
-    )
-    belt_group = game.connect_entities(
-        belt_group, Position(x=-2, y=2), Prototype.TransportBelt
-    )
-
-    assert len(belt_group.inputs) == 1, "There must be a single input"
-    assert len(belt_group.outputs) == 1, "There must be a single output"
-    belt_group = game.connect_entities(belt_group, belt_group, Prototype.TransportBelt)
-
-    # This should result in a single contiguous group
-    assert belt_group
-    assert len(belt_group.inputs) == 0
-    assert len(belt_group.outputs) == 0
+    if expected_inputs is not None:
+        assert len(belt_group.inputs) == expected_inputs
+    if expected_outputs is not None:
+        assert len(belt_group.outputs) == expected_outputs
 
 
 def test_belt_group(game):
@@ -652,7 +523,6 @@ def test_belt_group(game):
         entity for entity in game.get_entities() if isinstance(entity, BeltGroup)
     ]
     assert belt_groups
-    pass
 
 
 def test_connect_belts_with_end_rotation(game):
@@ -804,60 +674,10 @@ def test_multi_belt_join(game):
     assert len(belts.belts) > 25
 
 
-def test_ensure_final_belt_rotation_correct(game):
-    iron_ore_loc = game.nearest(Resource.IronOre)
-    print(f"found iron ore at {iron_ore_loc}")
-    game.move_to(iron_ore_loc)
-    print("Moved to iron ore location")
-    furnace = game.place_entity(Prototype.StoneFurnace, position=iron_ore_loc)
-    print(f"Placed a drill at location ({furnace.position}) and inserted coal")
-
-    # put a inserter next to the furnace
-    furnace_output_inserter = game.place_entity_next_to(
-        Prototype.BurnerInserter, reference_position=furnace.position, spacing=0
-    )
-    # no need to rotate as inserter takes from furnace
-    print(f"Placed inserter at {furnace_output_inserter.position} and inserted coal")
-
-    chest_pos = Position(x=furnace.position.x - 9, y=furnace.position.y)
-    game.move_to(chest_pos)
-    chest = game.place_entity(Prototype.WoodenChest, position=chest_pos)
-    print(f"Placed chest to pickup plates at ({chest.position})")
-
-    belts = game.connect_entities(
-        furnace_output_inserter.drop_position,
-        chest.position.right(1),
-        Prototype.TransportBelt,
-    )
-    print(
-        f"Connected furnace_output_inserter at {furnace_output_inserter.position} to chest at {chest.position} with belts {belts}"
-    )
-    assert len(belts.belts) > 10
-    assert True, "Could not create belt"
-
-
-def test_connect_furnace(game):
-    furnace = game.place_entity(Prototype.StoneFurnace, position=Position(x=2, y=0))
-    try:
-        game.connect_entities(
-            Position(x=0, y=0), furnace.position, Prototype.TransportBelt
-        )
-        assert False, (
-            "Should not be able to connect here, as it is blocked by the furnace"
-        )
-    except:
-        assert True
-
-
 def test_failure_to_connect_furnace(game):
     furnace = game.place_entity(Prototype.StoneFurnace, position=Position(x=2, y=0))
-    try:
-        game.connect_entities(Position(x=0, y=-10), furnace, Prototype.TransportBelt)
-        assert False, (
-            "Should not be able to connect here, as it is blocked by the furnace"
-        )
-    except Exception:
-        assert True
+    with pytest.raises(Exception):
+        game.connect_entities(Position(x=0, y=0), furnace, Prototype.TransportBelt)
 
 
 def test_get_existing_belt_connection_group(game):

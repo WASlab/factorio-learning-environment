@@ -226,42 +226,61 @@ def test_high_information_candidates_preferred_in_expectation(rating):
     assert wins >= 17  # dominant score with tiny jitter
 
 
-def test_unseen_mixture_is_selected_before_repeating_covered_mixture(rating):
-    history = SelectionHistory()
-    history.record(_features(product_id="iron-plate"), "consolidation")
-    consolidation = _candidate(item="copper-plate", effective=0.0)
-    frontier = _candidate(item="steel-plate", effective=12.0).model_copy(
-        update={"mixture_class": "frontier"}
-    )
+@pytest.mark.parametrize(
+    ("pool_factory", "expected_attr", "expected_value"),
+    [
+        pytest.param(
+            "unseen_mixture",
+            "mixture_class",
+            "frontier",
+            id="unseen_mixture_before_repeating_covered_mixture",
+        ),
+        pytest.param(
+            "first_epoch",
+            "mixture_class",
+            "consolidation",
+            id="first_epoch_bootstraps_before_frontier",
+        ),
+        pytest.param(
+            "unseen_product",
+            "item_name",
+            "copper-plate",
+            id="unseen_product_before_same_class_repeat",
+        ),
+    ],
+)
+def test_selector_prefers_unseen_before_repeats(
+    rating, pool_factory, expected_attr, expected_value
+):
+    if pool_factory == "first_epoch":
+        history = SelectionHistory()
+    else:
+        history = SelectionHistory()
+        history.record(_features(product_id="iron-plate"), "consolidation")
+    if pool_factory == "unseen_mixture":
+        pool = [
+            _candidate(item="copper-plate", effective=0.0),
+            _candidate(item="steel-plate", effective=12.0).model_copy(
+                update={"mixture_class": "frontier"}
+            ),
+        ]
+    elif pool_factory == "first_epoch":
+        pool = [
+            _candidate(item="iron-plate", effective=12.0),
+            _candidate(item="steel-plate", effective=0.0).model_copy(
+                update={"mixture_class": "frontier"}
+            ),
+        ]
+    else:
+        pool = [
+            _candidate(item="iron-plate", effective=0.0),
+            _candidate(item="copper-plate", effective=12.0),
+        ]
     for seed in range(10):
         selected, _ = ContractSelector().select(
-            [consolidation, frontier], rating, history, selection_seed=seed
+            pool, rating, history, selection_seed=seed
         )
-        assert selected.mixture_class == "frontier"
-
-
-def test_first_epoch_bootstraps_before_frontier(rating):
-    consolidation = _candidate(item="iron-plate", effective=12.0)
-    frontier = _candidate(item="steel-plate", effective=0.0).model_copy(
-        update={"mixture_class": "frontier"}
-    )
-    for seed in range(10):
-        selected, _ = ContractSelector().select(
-            [consolidation, frontier], rating, SelectionHistory(), selection_seed=seed
-        )
-        assert selected.mixture_class == "consolidation"
-
-
-def test_unseen_product_is_selected_before_same_class_repeat(rating):
-    history = SelectionHistory()
-    history.record(_features(product_id="iron-plate"), "consolidation")
-    repeated = _candidate(item="iron-plate", effective=0.0)
-    unseen = _candidate(item="copper-plate", effective=12.0)
-    for seed in range(10):
-        selected, _ = ContractSelector().select(
-            [repeated, unseen], rating, history, selection_seed=seed
-        )
-        assert selected.item_name == "copper-plate"
+        assert getattr(selected, expected_attr) == expected_value
 
 
 def test_empty_pool_raises_selection_error(rating):

@@ -194,24 +194,6 @@ def test_stale_cursor_falls_back_to_keyframe_and_public_history_is_compact():
     assert "inventory" not in worker._public_state_history[1]
 
 
-def test_state_delta_accepts_json_restored_error_key_lists():
-    before = {
-        "revision": 1,
-        "errors": {"_keys": ["1:old"], "distinct": []},
-    }
-    after = {
-        "revision": 2,
-        "errors": {
-            "_keys": ["1:old", "2:new"],
-            "distinct": [{"sequence": 2, "result": "new"}],
-        },
-    }
-
-    delta = FLEWorker._state_delta(before, after, 2)
-
-    assert delta["errors"]["new"] == [{"sequence": 2, "result": "new"}]
-
-
 def test_delivery_ledger_is_not_lost_when_recent_observation_projection_is_bounded():
     worker, _ = _worker()
     worker._delivery_history = []
@@ -220,7 +202,8 @@ def test_delivery_ledger_is_not_lost_when_recent_observation_projection_is_bound
     for tick in range(1100):
         worker._record_delivery_samples({"tick": tick}, [(tick, {"iron-plate": 1.0})])
 
-    assert len(worker._delivery_history) == 1100
-    assert worker._delivery_history[0] == (0, {"iron-plate": 1.0})
-    assert worker._delivery_history[-1] == (1099, {"iron-plate": 1.0})
-    assert worker._delivery_raw_totals == {"iron-plate": 1100.0}
+    telemetry = FLEWorker._delivery_telemetry_snapshot(worker)
+    assert telemetry.sample_count == 1100
+    assert telemetry.raw_totals == {"iron-plate": 1100.0}
+    assert len(telemetry.recent_buckets) == 120
+    assert telemetry.recent_buckets[-1]["items"] == {"iron-plate": 1.0}

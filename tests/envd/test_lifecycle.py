@@ -60,16 +60,10 @@ def test_quota_mix_is_exact_over_a_block():
     assert sources.count("fresh") == 11
     assert sources.count("inherited") == 5
     assert sources.count("pathological") == 4
-
-
-def test_composition_reflects_draws():
-    config = GenerationConfig(fresh_fraction=0.5, inherited_fraction=0.5, pathological_fraction=0.0)
-    manager = GenerationManager(config, generation_id="comp")
-    for _ in range(10):
-        manager.sample_source()
     composition = manager.composition()
-    assert composition["fresh"] == pytest.approx(0.5)
-    assert composition["inherited"] == pytest.approx(0.5)
+    assert composition["fresh"] == pytest.approx(0.55)
+    assert composition["inherited"] == pytest.approx(0.25)
+    assert composition["pathological"] == pytest.approx(0.20)
 
 
 # ---------------------------------------------------------------------------
@@ -98,7 +92,7 @@ def _seed_one_healthy_lineage(manager: GenerationManager, ratio: float) -> str:
 
 def test_inherited_continues_healthiest_lineage():
     manager = GenerationManager(GenerationConfig(), generation_id="inh")
-    weak = _seed_one_healthy_lineage(manager, 0.4)
+    _seed_one_healthy_lineage(manager, 0.4)
     strong = _seed_one_healthy_lineage(manager, 0.9)
 
     # Draw until an inherited slot comes up.
@@ -113,10 +107,11 @@ def test_inherited_continues_healthiest_lineage():
 def test_pathological_targets_weakest_and_attaches_shocks():
     manager = GenerationManager(GenerationConfig(), generation_id="pathos")
     weak = _seed_one_healthy_lineage(manager, 0.2)
-    strong = _seed_one_healthy_lineage(manager, 0.9)
+    _seed_one_healthy_lineage(manager, 0.9)
 
     plan = next(
-        p for p in (manager.plan_episode() for _ in range(12))
+        p
+        for p in (manager.plan_episode() for _ in range(12))
         if p.source == "pathological"
     )
     assert plan.lineage_id == weak
@@ -127,7 +122,9 @@ def test_pathological_targets_weakest_and_attaches_shocks():
 
 
 def test_fallback_to_fresh_when_no_active_lineages():
-    config = GenerationConfig(fresh_fraction=0.0, inherited_fraction=0.5, pathological_fraction=0.5)
+    config = GenerationConfig(
+        fresh_fraction=0.0, inherited_fraction=0.5, pathological_fraction=0.5
+    )
     manager = GenerationManager(config, generation_id="fallback")
     plan = manager.plan_episode()
     assert plan.source == "fresh"
@@ -175,7 +172,7 @@ def test_healthy_above_restart_baseline():
 def test_dominated_below_reset_margin():
     manager = GenerationManager(GenerationConfig(reset_cost=0.10), "cls-b")
     # Establish a strong restart baseline from a successful fresh lineage.
-    strong = _seed_one_healthy_lineage(manager, 0.95)
+    _seed_one_healthy_lineage(manager, 0.95)
     assert manager.restart_baseline() > 0.5
 
     poor = manager.create_lineage(seed=2)
@@ -196,8 +193,10 @@ def test_dominated_below_reset_margin():
 
 
 def test_degraded_band_continues():
-    manager = GenerationManager(GenerationConfig(reset_cost=0.10, degraded_margin=0.05), "cls-c")
-    strong = _seed_one_healthy_lineage(manager, 0.95)
+    manager = GenerationManager(
+        GenerationConfig(reset_cost=0.10, degraded_margin=0.05), "cls-c"
+    )
+    _seed_one_healthy_lineage(manager, 0.95)
 
     middling = manager.create_lineage(seed=3)
     middling.contracts_total = 10
@@ -240,18 +239,14 @@ def test_pending_shocks_penalize_continuation():
         sustained_capability=0.5,
     )
     clean = manager.classify_outcome(lid, snapshot=snapshot)
-    shocked = manager.classify_outcome(
-        lid, snapshot=snapshot, pending_shocks=3
-    )
+    shocked = manager.classify_outcome(lid, snapshot=snapshot, pending_shocks=3)
     assert shocked.continuation_value <= clean.continuation_value
 
 
 def test_horizon_cap_forces_retirement():
-    manager = GenerationManager(
-        GenerationConfig(max_lineage_episodes=1), "cls-f"
-    )
+    manager = GenerationManager(GenerationConfig(max_lineage_episodes=1), "cls-f")
     lid = manager.create_lineage(seed=6).lineage_id
-    decision = manager.record_episode(
+    manager.record_episode(
         lid,
         ticks_elapsed=1000,
         decision=_forced("healthy", lid),

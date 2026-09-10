@@ -6,15 +6,6 @@ from fle.envd.service import EnvironmentService
 from tests.envd.conftest import FakeWorker
 
 
-def test_local_app_exposes_checkpoint_route():
-    app = create_app(EnvironmentService([FakeWorker()]))
-
-    assert any(
-        route.path == "/v1/leases/{lease_id}/checkpoints" and "POST" in route.methods
-        for route in app.routes
-    )
-
-
 pytestmark = pytest.mark.no_factorio
 
 

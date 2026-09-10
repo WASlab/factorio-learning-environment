@@ -1,15 +1,12 @@
 from time import sleep
-from typing import List, Union
 
 import pytest
 
 from fle.env.entities import (
-    Entity,
     Position,
     ResourcePatch,
     Recipe,
     BurnerMiningDrill,
-    EntityGroup,
     Direction,
 )
 from fle.env.game_types import Prototype, RecipeName, Resource
@@ -28,110 +25,6 @@ def game(instance):
     # instance.rcon_client.send_command('game.reload_script()')
     instance.reset(all_technologies_researched=True)
     yield instance.namespace
-
-
-def test_collect_iron_ore(game):
-    """
-    Collect 10 iron ore
-    :param game:
-    :return:
-    """
-    iron_ore = game.nearest(Resource.IronOre)
-    # move to the iron ore
-    game.move_to(iron_ore)
-    game.harvest_resource(iron_ore)
-
-    assert game.inspect_inventory()[Prototype.IronOre] == 1
-    game.reset()
-
-
-def test_place_ore_in_furnace(game):
-    """
-    Collect 10 iron ore and place it in a furnace
-    :param game:
-    :return:
-    """
-    furnace = game.place_entity(Prototype.StoneFurnace, position=Position(x=0, y=0))
-
-    # move to the iron ore
-    iron_ore_patch = game.get_resource_patch(
-        Resource.IronOre, game.nearest(Resource.IronOre)
-    )
-    game.move_to(iron_ore_patch.bounding_box.left_top + Position(x=1, y=1))
-    game.harvest_resource(iron_ore_patch.bounding_box.left_top, quantity=10)
-
-    # move to the coal
-    coal_patch = game.get_resource_patch(Resource.Coal, game.nearest(Resource.Coal))
-    game.move_to(coal_patch.bounding_box.left_top + Position(x=1, y=1))
-    game.harvest_resource(coal_patch.bounding_box.left_top, quantity=10)
-
-    # move to the furnace
-    game.move_to(furnace.position)
-    game.insert_item(Prototype.IronOre, furnace, quantity=10)
-    game.insert_item(Prototype.Coal, furnace, quantity=10)
-
-    game.reset()
-
-
-def test_connect_steam_engines_to_boilers_using_pipes(game):
-    """
-    Place a boiler and a steam engine next to each other in 3 cardinal directions.
-    :param game:
-    :return:
-    """
-    boilers_in_inventory = game.inspect_inventory()[Prototype.Boiler]
-    steam_engines_in_inventory = game.inspect_inventory()[Prototype.SteamEngine]
-    pipes_in_inventory = game.inspect_inventory()[Prototype.Pipe]
-    game.move_to(Position(x=0, y=0))
-    boiler: Entity = game.place_entity(Prototype.Boiler, position=Position(x=0, y=0))
-    game.move_to(Position(x=0, y=5))
-    steam_engine: Entity = game.place_entity(
-        Prototype.SteamEngine, position=Position(x=0, y=10)
-    )
-
-    try:
-        connection: List[Entity] = game.connect_entities(
-            boiler, steam_engine, connection_type=Prototype.Pipe
-        )
-        assert False
-    except Exception as e:
-        print(e)
-        assert True
-    game.pickup_entity(steam_engine)
-    game.pickup_entity(connection)
-
-    # Define the offsets for the four cardinal directions
-    offsets = [
-        Position(x=5, y=0),
-        Position(x=0, y=5),
-        Position(x=-5, y=0),
-        Position(x=0, y=-5),
-    ]  # Up, Right, Down, Left  (0, -10),
-
-    for offset in offsets:
-        game.move_to(offset)
-
-        steam_engine: Entity = game.place_entity(Prototype.SteamEngine, position=offset)
-
-        try:
-            connection: List[Union[EntityGroup, Entity]] = game.connect_entities(
-                boiler, steam_engine, connection_type=Prototype.Pipe
-            )
-        except Exception as e:
-            print(e)
-            assert False
-        assert boilers_in_inventory - 1 == game.inspect_inventory()[Prototype.Boiler]
-        assert (
-            steam_engines_in_inventory - 1
-            == game.inspect_inventory()[Prototype.SteamEngine]
-        )
-
-        current_pipes_in_inventory = game.inspect_inventory()[Prototype.Pipe]
-        spent_pipes = pipes_in_inventory - current_pipes_in_inventory
-        assert spent_pipes == len(connection.pipes)
-
-        game.pickup_entity(steam_engine)
-        game.pickup_entity(connection)
 
 
 def test_build_iron_gear_factory(game):

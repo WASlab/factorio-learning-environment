@@ -37,36 +37,39 @@ def _state(namespace_blobs) -> GameState:
     )
 
 
-def test_to_instance_restores_namespace_vars():
-    blob = pickle.dumps({"gear_count": 42, "plan": "main-bus"})
-    instance = _fake_instance([_fake_namespace()])
+@pytest.mark.parametrize(
+    ("blobs", "initial_vars", "expected_vars"),
+    [
+        pytest.param(
+            [pickle.dumps({"gear_count": 42, "plan": "main-bus"})],
+            None,
+            [{"gear_count": 42, "plan": "main-bus"}],
+            id="restores_namespace_vars",
+        ),
+        pytest.param(
+            [bytes()],
+            {"kept": True},
+            [{"kept": True}],
+            id="skips_empty_blobs",
+        ),
+        pytest.param(
+            [pickle.dumps({"agent": 1}), pickle.dumps({"agent": 2})],
+            None,
+            [{"agent": 1}, {"agent": 2}],
+            id="maps_blobs_per_agent",
+        ),
+    ],
+)
+def test_to_instance_restores_persistent_vars(blobs, initial_vars, expected_vars):
+    namespaces = [_fake_namespace() for _ in blobs]
+    if initial_vars is not None:
+        namespaces[0].persistent_vars = initial_vars
+    instance = _fake_instance(namespaces)
 
-    _state([blob]).to_instance(instance)
+    _state(blobs).to_instance(instance)
 
-    assert instance.namespaces[0].persistent_vars["gear_count"] == 42
-    assert instance.namespaces[0].persistent_vars["plan"] == "main-bus"
-
-
-def test_to_instance_skips_empty_blobs():
-    namespace = _fake_namespace()
-    namespace.persistent_vars = {"kept": True}
-    instance = _fake_instance([namespace])
-
-    _state([bytes()]).to_instance(instance)
-
-    assert namespace.persistent_vars == {"kept": True}
-
-
-def test_to_instance_maps_blobs_per_agent():
-    first, second = _fake_namespace(), _fake_namespace()
-    instance = _fake_instance([first, second])
-
-    _state(
-        [pickle.dumps({"agent": 1}), pickle.dumps({"agent": 2})]
-    ).to_instance(instance)
-
-    assert first.persistent_vars == {"agent": 1}
-    assert second.persistent_vars == {"agent": 2}
+    for namespace, expected in zip(namespaces, expected_vars):
+        assert namespace.persistent_vars == expected
 
 
 def test_to_instance_never_pickles_the_live_namespace():

@@ -51,94 +51,74 @@ def create_electricity_connection(game, steam_engine_pos, boiler_pos):
     assert engine.energy > 0
 
 
-def test_electricity_far_west_configuration(game):
-    """Test electricity connection with steam engine far west of boiler"""
-    boiler_pos = Position(x=-15.5, y=-5.5)
-    steam_engine_pos = boiler_pos.left(20).up(10)
+@pytest.mark.parametrize(
+    "steam_engine_pos,boiler_pos",
+    [
+        pytest.param(
+            Position(x=-15.5, y=-5.5).left(20).up(10),
+            Position(x=-15.5, y=-5.5),
+            id="far-west",
+        ),
+        pytest.param(
+            Position(x=-5.5, y=0.5).up(4),
+            Position(x=-5.5, y=0.5),
+            id="vertical-close",
+        ),
+        pytest.param(
+            Position(x=-5.5, y=4.5).up(15).left(15),
+            Position(x=-5.5, y=4.5),
+            id="northwest",
+        ),
+        pytest.param(
+            Position(x=-5.5, y=4.5).left(20),
+            Position(x=-5.5, y=4.5),
+            id="far-west-horizontal",
+        ),
+        pytest.param(
+            Position(x=-5.5, y=-2.5).right(5),
+            Position(x=-5.5, y=-2.5),
+            id="east",
+        ),
+        pytest.param(
+            Position(x=-5.5, y=-2.5).down(5),
+            Position(x=-5.5, y=-2.5),
+            id="vertical-below",
+        ),
+        pytest.param(
+            Position(x=-15.5, y=-7.5),
+            Position(x=-5.5, y=-2.5),
+            id="southwest",
+        ),
+        pytest.param(
+            Position(x=-15.5, y=-7.5),
+            Position(x=-5.5, y=5.5),
+            id="southwest-far",
+        ),
+        pytest.param(
+            Position(x=-15.5, y=-7.5),
+            Position(x=-8.5, y=5.5),
+            id="southwest-offset",
+        ),
+        pytest.param(
+            Position(x=-5.5, y=-7.5),
+            Position(x=-8.5, y=5.5),
+            id="south",
+        ),
+        pytest.param(
+            Position(x=8.5, y=15.5),
+            Position(x=8.5, y=5.5),
+            id="north",
+        ),
+        pytest.param(
+            Position(x=8.5, y=4.5),
+            Position(x=0.5, y=-5.5),
+            id="southwest-horizontal",
+        ),
+    ],
+)
+def test_electricity_configuration(game, steam_engine_pos, boiler_pos):
+    """Test electricity connection between a boiler and a steam engine"""
     create_electricity_connection(game, steam_engine_pos, boiler_pos)
-
-
-def test_electricity_vertical_close_configuration(game):
-    """Test electricity connection with steam engine directly above boiler"""
-    boiler_pos = Position(x=-5.5, y=0.5)
-    steam_engine_pos = boiler_pos.up(4)
-    create_electricity_connection(game, steam_engine_pos, boiler_pos)
-    pass
-
-
-def test_electricity_northwest_configuration(game):
-    """Test electricity connection with steam engine northwest of boiler"""
-    boiler_pos = Position(x=-5.5, y=4.5)
-    steam_engine_pos = boiler_pos.up(15).left(15)
-    create_electricity_connection(game, steam_engine_pos, boiler_pos)
-
-
-def test_electricity_far_west_horizontal_configuration(game):
-    """Test electricity connection with steam engine far west on same y-level"""
-    boiler_pos = Position(x=-5.5, y=4.5)
-    steam_engine_pos = boiler_pos.left(20)
-    create_electricity_connection(game, steam_engine_pos, boiler_pos)
-
-
-def test_electricity_east_configuration(game):
-    """Test electricity connection with steam engine east of boiler"""
-    boiler_pos = Position(x=-5.5, y=-2.5)
-    steam_engine_pos = boiler_pos.right(5)
-    create_electricity_connection(game, steam_engine_pos, boiler_pos)
-
-
-def test_electricity_vertical_below_configuration(game):
-    """Test electricity connection with steam engine below boiler"""
-    boiler_pos = Position(x=-5.5, y=-2.5)
-    steam_engine_pos = boiler_pos.down(5)
-    create_electricity_connection(game, steam_engine_pos, boiler_pos)
-    pass
-
-
-def test_electricity_southwest_configuration(game):
-    """Test electricity connection with steam engine southwest of boiler"""
-    steam_engine_pos = Position(x=-15.5, y=-7.5)
-    boiler_pos = Position(x=-5.5, y=-2.5)
-    create_electricity_connection(game, steam_engine_pos, boiler_pos)
-
-
-def test_electricity_southwest_far_configuration(game):
-    """Test electricity connection with steam engine far southwest of boiler"""
-    steam_engine_pos = Position(x=-15.5, y=-7.5)
-    boiler_pos = Position(x=-5.5, y=5.5)
-    create_electricity_connection(game, steam_engine_pos, boiler_pos)
-
-
-def test_electricity_southwest_offset_configuration(game):
-    """Test electricity connection with steam engine southwest of offset boiler"""
-    steam_engine_pos = Position(x=-15.5, y=-7.5)
-    boiler_pos = Position(x=-8.5, y=5.5)
-    create_electricity_connection(game, steam_engine_pos, boiler_pos)
-    pass
-
-
-def test_electricity_south_configuration(game):
-    """Test electricity connection with steam engine south of boiler"""
-    steam_engine_pos = Position(x=-5.5, y=-7.5)
-    boiler_pos = Position(x=-8.5, y=5.5)
-    create_electricity_connection(game, steam_engine_pos, boiler_pos)
-    pass
-
-
-def test_electricity_north_configuration(game):
-    """Test electricity connection with steam engine north of boiler"""
-    steam_engine_pos = Position(x=8.5, y=15.5)
-    boiler_pos = Position(x=8.5, y=5.5)
-    create_electricity_connection(game, steam_engine_pos, boiler_pos)
-    pass
-
-
-def test_electricity_southwest_horizontal_configuration(game):
-    """Test electricity connection with steam engine southwest on same y-level"""
-    steam_engine_pos = Position(x=8.5, y=4.5)
-    boiler_pos = Position(x=0.5, y=-5.5)
-    create_electricity_connection(game, steam_engine_pos, boiler_pos)
-    pass
 
 
 def test_connect_steam_engines(game):
@@ -150,10 +130,10 @@ def test_connect_steam_engines(game):
     game.move_to(steam_engine_pos2)
     engine2 = game.place_entity(Prototype.SteamEngine, position=steam_engine_pos2)
 
-    game.connect_entities(engine1, engine2, Prototype.Pipe)
+    pipes = game.connect_entities(engine1, engine2, Prototype.Pipe)
     game.connect_entities(engine1, engine2, Prototype.Pipe)
 
-    assert True
+    assert pipes
 
 
 def test_connect_boilers(game):
@@ -165,9 +145,9 @@ def test_connect_boilers(game):
     game.move_to(pos2)
     boiler2 = game.place_entity(Prototype.Boiler, position=pos2)
 
-    game.connect_entities(boiler1, boiler2, Prototype.Pipe)
+    pipes = game.connect_entities(boiler1, boiler2, Prototype.Pipe)
 
-    assert True
+    assert pipes
 
 
 def test_multiple(game):

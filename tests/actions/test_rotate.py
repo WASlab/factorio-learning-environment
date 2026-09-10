@@ -27,16 +27,9 @@ def test_rotate_assembling_machine_2(game):
         direction=Direction.RIGHT,
         spacing=2,
     )
-    # orthogonal direction to the boiler
-    orthogonal_direction = Direction.DOWN
 
-    # rotate the boiler to face the offshore pump
-    try:
-        assembler = game.rotate_entity(assembler, orthogonal_direction)
-        assert False, "Cannot rotate an assembler without a recipe set"
-    except:
-        assert True
-        return
+    with pytest.raises(Exception):
+        game.rotate_entity(assembler, Direction.DOWN)
 
 
 def test_rotate_assembling_machine_2_with_recipe(game):
@@ -75,22 +68,19 @@ def test_rotate_boiler(game):
     assert boiler.direction.value == orthogonal_direction.value
 
 
-def test_rotate_transport_belt(game):
-    # Place a transport belt
-    transport_belt = game.place_entity(
-        Prototype.TransportBelt, position=(0, 0), direction=Direction.UP
+@pytest.mark.parametrize(
+    "entity_prototype",
+    [Prototype.TransportBelt, Prototype.BurnerInserter],
+)
+def test_rotate_entity_directions(game, entity_prototype):
+    entity = game.place_entity(
+        entity_prototype, position=(0, 0), direction=Direction.UP
     )
-    assert transport_belt.direction.value == Direction.UP.value
-    rotate_entity(game, transport_belt)
+    assert entity.direction.value == Direction.UP.value
 
-
-def test_rotate_inserter(game):
-    # Place a burner inserter
-    inserter = game.place_entity(
-        Prototype.BurnerInserter, position=(0, 0), direction=Direction.UP
-    )
-    assert inserter.direction.value == Direction.UP.value
-    rotate_entity(game, inserter)
+    for direction in [Direction.RIGHT, Direction.LEFT, Direction.DOWN, Direction.UP]:
+        entity = game.rotate_entity(entity, direction=direction)
+        assert entity.direction.value == direction.value
 
 
 def test_rotate_transport_belt_output_and_input_position(game):
@@ -124,42 +114,3 @@ def test_rotate_inserters(game):
     insert1 = game.rotate_entity(insert1, Direction.UP)
     assert insert1 is not None, "Failed to place input inserter"
     assert insert1.direction.value == Direction.UP.value
-
-
-def test_rotate_transport_belts(game):
-    belt = game.place_entity(
-        Prototype.TransportBelt, position=(0, 0), direction=Direction.UP
-    )
-    assert belt.direction.value == Direction.UP.value
-
-    belt = game.rotate_entity(belt, direction=Direction.DOWN)
-    assert belt.direction.value == Direction.DOWN.value
-
-    belt = game.rotate_entity(belt, direction=Direction.LEFT)
-    assert belt.direction.value == Direction.LEFT.value
-
-    belt = game.rotate_entity(belt, direction=Direction.RIGHT)
-    assert belt.direction.value == Direction.RIGHT.value
-
-    belt = game.rotate_entity(belt, direction=Direction.UP)
-    assert belt.direction.value == Direction.UP.value
-
-
-def rotate_entity(game, entity):
-    # Rotate the transport belt right
-    entity = game.rotate_entity(entity, direction=Direction.RIGHT)
-
-    # Assert that the direction of the transport belt has been updated
-    assert entity.direction.value == Direction.RIGHT.value
-
-    entity = game.rotate_entity(entity, direction=Direction.LEFT)
-
-    assert entity.direction.value == Direction.LEFT.value
-
-    entity = game.rotate_entity(entity, direction=Direction.DOWN)
-
-    assert entity.direction.value == Direction.DOWN.value
-
-    entity = game.rotate_entity(entity, direction=Direction.UP)
-
-    assert entity.direction.value == Direction.UP.value

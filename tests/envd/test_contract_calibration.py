@@ -188,41 +188,40 @@ def test_feature_row_separates_raw_and_state():
     assert "supply_pressure_ratio" not in state
 
 
-def test_anchor_centering_fixes_location():
+@pytest.mark.parametrize(
+    ("case", "seed", "template_intercept"),
+    [
+        pytest.param("anchor_mean_is_zero", 5, None, id="anchor_mean_is_zero"),
+        pytest.param("margins_preserved", 7, 1.25, id="margins_preserved"),
+    ],
+)
+def test_anchor_centering_invariants(case, seed, template_intercept):
     from fle.envd.contract_calibration import DesignMatrix, _Model, _fix_identifiability
     import numpy as np
 
-    records = _synthetic_records(n_per_participant=12, seed=5)
-    design = DesignMatrix(records)
+    design = DesignMatrix(_synthetic_records(n_per_participant=12, seed=seed))
     model = _Model(design, fit_threshold=False)
     params = np.zeros(model.packed_size())
     params[: model.n_participants] = [5.0, 2.0, 8.0][: model.n_participants]
+    if template_intercept is not None:
+        params[model.n_participants : model.n_participants + model.n_templates] = (
+            template_intercept
+        )
+        before = model.margins(model.unpack(params)).copy()
     _fix_identifiability(model, params)
     view = model.unpack(params)
-    anchor_mean = float(
-        np.mean(
-            [
-                view["abilities"][design.participant_index[p]]
-                for p in ("p_strong", "p_mid", "p_weak")
-            ]
+    if case == "anchor_mean_is_zero":
+        anchor_mean = float(
+            np.mean(
+                [
+                    view["abilities"][design.participant_index[p]]
+                    for p in ("p_strong", "p_mid", "p_weak")
+                ]
+            )
         )
-    )
-    assert anchor_mean == pytest.approx(0.0, abs=1e-9)
-
-
-def test_anchor_centering_preserves_fitted_margins():
-    from fle.envd.contract_calibration import DesignMatrix, _Model, _fix_identifiability
-    import numpy as np
-
-    design = DesignMatrix(_synthetic_records(n_per_participant=12, seed=7))
-    model = _Model(design, fit_threshold=False)
-    params = np.zeros(model.packed_size())
-    params[: model.n_participants] = [5.0, 2.0, 8.0][: model.n_participants]
-    params[model.n_participants : model.n_participants + model.n_templates] = 1.25
-    before = model.margins(model.unpack(params)).copy()
-    _fix_identifiability(model, params)
-    after = model.margins(model.unpack(params))
-    assert np.allclose(before, after)
+        assert anchor_mean == pytest.approx(0.0, abs=1e-9)
+    else:
+        assert np.allclose(before, model.margins(view))
 
 
 def test_manifest_threshold_validation():

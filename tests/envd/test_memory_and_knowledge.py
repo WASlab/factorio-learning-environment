@@ -1,4 +1,3 @@
-
 import pytest
 
 from fle.envd.capability_graph import (
@@ -343,30 +342,19 @@ def test_follow_up_repeats_frontier_after_capability_progress():
     assert follow_up.reason == "frontier_progress_repeat"
 
 
-def test_follow_up_backs_off_to_dependency_after_zero_progress():
+@pytest.mark.parametrize(
+    "outcome_status",
+    ["expired", "partial"],
+    ids=["expired", "zero_delivery_partial"],
+)
+def test_follow_up_zero_progress_backs_off_to_dependency(outcome_status):
     selected, follow_up = choose_follow_up_candidate(
         [
             _candidate("steel-plate", 80, 4500),
             _candidate("iron-plate", 30, 5000, mixture="consolidation"),
         ],
         previous_spec=_previous_spec(),
-        previous_outcome=_outcome("expired"),
-        capability_delta=None,
-        catalog=_catalog(),
-        selection_seed=7,
-    )
-    assert selected is not None and selected.item_name == "iron-plate"
-    assert follow_up is not None and follow_up.reason == "zero_progress_backoff"
-
-
-def test_zero_delivery_partial_backs_off_instead_of_claiming_capacity():
-    selected, follow_up = choose_follow_up_candidate(
-        [
-            _candidate("steel-plate", 80, 4500),
-            _candidate("iron-plate", 30, 5000, mixture="consolidation"),
-        ],
-        previous_spec=_previous_spec(),
-        previous_outcome=_outcome("partial", delivered=0),
+        previous_outcome=_outcome(outcome_status, delivered=0),
         capability_delta=None,
         catalog=_catalog(),
         selection_seed=7,

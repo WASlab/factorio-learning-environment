@@ -39,9 +39,3 @@ def test_inspect_assembling_machine_inventory(game):
     chest_inventory = game.inspect_inventory(entity=machine)
     iron_count = chest_inventory[Prototype.IronPlate]
     assert iron_count == 5
-
-
-def test_print_inventory(game):
-    inventory = game.inspect_inventory()
-    game.print(inventory)
-    assert True

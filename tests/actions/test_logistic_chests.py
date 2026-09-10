@@ -28,45 +28,19 @@ def game(configure_game):
     )
 
 
-def test_place_passive_provider_chest(game):
-    """Test basic passive provider chest placement."""
-    chest = game.place_entity(
-        Prototype.PassiveProviderChest, position=Position(x=0, y=0)
-    )
-    assert chest is not None
-    # 1x1 entities placed at (0,0) have center at (0.5, 0.5)
-    assert chest.position.is_close(Position(x=0.5, y=0.5))
-
-
-def test_place_active_provider_chest(game):
-    """Test basic active provider chest placement."""
-    chest = game.place_entity(
-        Prototype.ActiveProviderChest, position=Position(x=0, y=0)
-    )
-    assert chest is not None
-    # 1x1 entities placed at (0,0) have center at (0.5, 0.5)
-    assert chest.position.is_close(Position(x=0.5, y=0.5))
-
-
-def test_place_storage_chest(game):
-    """Test basic storage chest placement."""
-    chest = game.place_entity(Prototype.StorageChest, position=Position(x=0, y=0))
-    assert chest is not None
-    # 1x1 entities placed at (0,0) have center at (0.5, 0.5)
-    assert chest.position.is_close(Position(x=0.5, y=0.5))
-
-
-def test_place_requester_chest(game):
-    """Test basic requester chest placement."""
-    chest = game.place_entity(Prototype.RequesterChest, position=Position(x=0, y=0))
-    assert chest is not None
-    # 1x1 entities placed at (0,0) have center at (0.5, 0.5)
-    assert chest.position.is_close(Position(x=0.5, y=0.5))
-
-
-def test_place_buffer_chest(game):
-    """Test basic buffer chest placement."""
-    chest = game.place_entity(Prototype.BufferChest, position=Position(x=0, y=0))
+@pytest.mark.parametrize(
+    "chest_prototype",
+    [
+        Prototype.PassiveProviderChest,
+        Prototype.ActiveProviderChest,
+        Prototype.StorageChest,
+        Prototype.RequesterChest,
+        Prototype.BufferChest,
+    ],
+)
+def test_place_logistic_chest(game, chest_prototype):
+    """Test basic logistic chest placement."""
+    chest = game.place_entity(chest_prototype, position=Position(x=0, y=0))
     assert chest is not None
     # 1x1 entities placed at (0,0) have center at (0.5, 0.5)
     assert chest.position.is_close(Position(x=0.5, y=0.5))
@@ -97,28 +71,6 @@ def test_logistic_chest_pickup(game):
     game.pickup_entity(chest)
     after = game.inspect_inventory()[Prototype.StorageChest]
     assert before == after
-
-
-def test_place_all_logistic_chest_types(game):
-    """Test placing all 5 types of logistic chests."""
-    chest_types = [
-        Prototype.PassiveProviderChest,
-        Prototype.ActiveProviderChest,
-        Prototype.StorageChest,
-        Prototype.RequesterChest,
-        Prototype.BufferChest,
-    ]
-    positions = [Position(x=i * 2, y=0) for i in range(len(chest_types))]
-
-    chests = []
-    for chest_type, pos in zip(chest_types, positions):
-        game.move_to(pos)
-        chest = game.place_entity(chest_type, position=pos)
-        chests.append(chest)
-
-    assert len(chests) == 5
-    for chest in chests:
-        assert chest is not None
 
 
 def test_logistic_chest_can_be_retrieved(game):

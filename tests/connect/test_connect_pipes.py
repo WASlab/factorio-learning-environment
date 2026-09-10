@@ -3,11 +3,9 @@ import math
 import pytest
 
 from fle.env.entities import (
-    BuildingBox,
     Direction,
     Entity,
     EntityStatus,
-    Generator,
     PipeGroup,
     Position,
     ResourcePatch,
@@ -38,65 +36,6 @@ def game(instance):
     instance.reset()
     yield instance.namespace
     instance.reset()
-
-
-def test_connect_electricity_bug(game):
-    # First find water
-    water_pos = game.nearest(Resource.Water)
-    print(f"Found water at {water_pos}")
-
-    # Place offshore pump
-    game.move_to(water_pos)
-    offshore_pump = game.place_entity(Prototype.OffshorePump, position=water_pos)
-    print(f"Placed offshore pump at {offshore_pump.position}")
-
-    # Place storage tank for water buffer
-    # Need to find safe spot away from water
-    building_box = BuildingBox(
-        width=Prototype.StorageTank.WIDTH + 4, height=Prototype.StorageTank.HEIGHT + 4
-    )
-    coords = game.nearest_buildable(
-        Prototype.StorageTank, building_box, offshore_pump.position
-    )
-    game.move_to(coords.center)
-    water_tank = game.place_entity(Prototype.StorageTank, position=coords.center)
-    print(f"Placed water storage tank at {water_tank.position}")
-
-    # Connect pump to tank with pipes
-    game.connect_entities(
-        offshore_pump, water_tank, {Prototype.Pipe, Prototype.UndergroundPipe}
-    )
-    print("Connected offshore pump to storage tank with pipes")
-
-    print("Setting up power system...")
-    # Place boiler near water tank
-    building_box = BuildingBox(
-        width=Prototype.Boiler.WIDTH + 4, height=Prototype.Boiler.HEIGHT + 4
-    )
-    coords = game.nearest_buildable(Prototype.Boiler, building_box, water_tank.position)
-    game.move_to(coords.center)
-    boiler = game.place_entity(Prototype.Boiler, position=coords.center)
-    print(f"Placed boiler at {boiler.position}")
-
-    # Add steam engine
-    building_box = BuildingBox(
-        width=Prototype.SteamEngine.WIDTH + 4, height=Prototype.SteamEngine.HEIGHT + 4
-    )
-    coords = game.nearest_buildable(
-        Prototype.SteamEngine, building_box, boiler.position
-    )
-    game.move_to(coords.center)
-    steam_engine = game.place_entity(Prototype.SteamEngine, position=coords.center)
-    print(f"Placed steam engine at {steam_engine.position}")
-
-    # Connect water and steam
-    game.connect_entities(
-        water_tank, boiler, {Prototype.Pipe, Prototype.UndergroundPipe}
-    )
-    game.connect_entities(
-        boiler, steam_engine, {Prototype.Pipe, Prototype.UndergroundPipe}
-    )
-    print("Connected water and steam pipes")
 
 
 def test_connect_offshore_pump_to_boiler(game):
@@ -329,62 +268,39 @@ def test_connect_steam_engine_boiler_nearly_adjacent(game):
     assert engine.status == EntityStatus.NOT_PLUGGED_IN_ELECTRIC_NETWORK
 
 
-def test_connect_boiler_to_steam_engine_with_pipes_horizontally(game):
+@pytest.mark.parametrize(
+    "boiler_direction,use_connection_points",
+    [
+        pytest.param(Direction.RIGHT, False, id="horizontal"),
+        pytest.param(Direction.UP, False, id="vertical"),
+        pytest.param(Direction.UP, True, id="vertical-with-connection-points"),
+    ],
+)
+def test_connect_boiler_to_steam_engine_with_pipes(
+    game, boiler_direction, use_connection_points
+):
     boiler_pos = Position(x=0, y=0)
     game.move_to(boiler_pos)
     boiler = game.place_entity(
-        Prototype.Boiler, position=boiler_pos, direction=Direction.RIGHT
+        Prototype.Boiler, position=boiler_pos, direction=boiler_direction
     )
 
-    # Step 5: Place and set up the steam engine
+    # Place and set up the steam engine
     steam_engine_pos = Position(x=boiler.position.x + 5, y=boiler.position.y + 5)
     game.move_to(steam_engine_pos)
     steam_engine = game.place_entity(
-        Prototype.SteamEngine, position=steam_engine_pos, direction=Direction.RIGHT
+        Prototype.SteamEngine, position=steam_engine_pos, direction=boiler_direction
     )
 
-    # Connect boiler to steam engine with pipes
-    pipes = game.connect_entities(boiler, steam_engine, Prototype.Pipe)
-    assert pipes, "Failed to connect boiler to steam engine with pipes"
-
-
-def test_connect_boiler_to_steam_engine_with_pipes_vertically(game):
-    boiler_pos = Position(x=0, y=0)
-    game.move_to(boiler_pos)
-    boiler = game.place_entity(
-        Prototype.Boiler, position=boiler_pos, direction=Direction.UP
-    )
-
-    # Step 5: Place and set up the steam engine
-    steam_engine_pos = Position(x=boiler.position.x + 5, y=boiler.position.y + 5)
-    game.move_to(steam_engine_pos)
-    steam_engine = game.place_entity(
-        Prototype.SteamEngine, position=steam_engine_pos, direction=Direction.UP
-    )
-
-    # Connect boiler to steam engine with pipes
-    pipes = game.connect_entities(boiler, steam_engine, Prototype.Pipe)
-    assert pipes, "Failed to connect boiler to steam engine with pipes"
-
-
-def test_connect_boiler_to_steam_engine_with_pipes_vertically_with_positions(game):
-    boiler_pos = Position(x=0, y=0)
-    game.move_to(boiler_pos)
-    boiler = game.place_entity(
-        Prototype.Boiler, position=boiler_pos, direction=Direction.UP
-    )
-
-    # Step 5: Place and set up the steam engine
-    steam_engine_pos = Position(x=boiler.position.x + 5, y=boiler.position.y + 5)
-    game.move_to(steam_engine_pos)
-    steam_engine: Generator = game.place_entity(
-        Prototype.SteamEngine, position=steam_engine_pos, direction=Direction.UP
-    )
-
-    # Connect boiler to steam engine with pipes
-    pipes = game.connect_entities(
-        boiler.steam_output_point, steam_engine.connection_points[0], Prototype.Pipe
-    )
+    if use_connection_points:
+        # Connect boiler to steam engine with pipes via connection points
+        pipes = game.connect_entities(
+            boiler.steam_output_point,
+            steam_engine.connection_points[0],
+            Prototype.Pipe,
+        )
+    else:
+        pipes = game.connect_entities(boiler, steam_engine, Prototype.Pipe)
     assert pipes, "Failed to connect boiler to steam engine with pipes"
 
 
@@ -498,13 +414,10 @@ def test_fail_connect_pipes_with_mixed_connection_types(game):
     """
     position_1 = Position(x=0, y=1)
     position_2 = Position(x=2, y=4)
-    try:
+    with pytest.raises(Exception):
         game.connect_entities(
             position_1, position_2, {Prototype.Pipe, Prototype.UndergroundBelt}
         )
-        assert False
-    except Exception:
-        assert True
 
 
 def test_avoiding_pipe_networks(game):
@@ -554,58 +467,6 @@ def test_pipe_network_branching(game):
     # Should merge into single network
     assert branch
     assert branch.id == main_line.id
-
-
-def test_pipe_network_branching_inverted(game):
-    """Test creating T-junctions and branched pipe networks"""
-    # Create main pipe line
-    start = Position(x=0, y=0)
-    end = Position(x=10, y=0)
-    main_line = game.connect_entities(start, end, Prototype.Pipe)
-
-    # Add branch from middle
-    branch_end = Position(x=5, y=5)
-    branch = game.connect_entities(branch_end, Position(x=5, y=0), Prototype.Pipe)
-
-    # Should merge into single network
-    assert branch
-    assert branch.id == main_line.id
-
-
-def test_connect_power_system_with_nearest_buildable(game):
-    water_position = game.nearest(Resource.Water)
-    # moveto water positon
-    game.move_to(water_position)
-    # first place offshore pump on the water system
-    offshore_pump = game.place_entity(Prototype.OffshorePump, position=water_position)
-    print(f"Placed offshore pump to get water at {offshore_pump.position}")
-    # Use nearest_buildable to find a valid position for the boiler
-    # The boiler has a dimension of 2x3, so we need to ensure there is enough space
-    boiler_building_box = BuildingBox(width=3, height=2)
-    boiler_bounding_box = game.nearest_buildable(
-        Prototype.Boiler,
-        building_box=boiler_building_box,
-        center_position=offshore_pump.position,
-    )
-
-    # Log the found position for the boiler
-    print(f"Found buildable position for boiler: {boiler_bounding_box.center}")
-
-    # Move to the center of the bounding box and place the boiler
-    game.move_to(boiler_bounding_box.center)
-    boiler = game.place_entity(
-        Prototype.Boiler, position=boiler_bounding_box.center.left(1)
-    )
-    print(f"Placed boiler at {boiler.position}")
-
-    # Connect the offshore pump to the boiler with pipes
-    pipes_to_boiler = game.connect_entities(
-        offshore_pump.position, boiler.position, Prototype.Pipe
-    )
-    print(f"Connected offshore pump to boiler with pipes: {pipes_to_boiler}")
-    game.sleep(2)
-    print(f"Updated entities on the map: {game.get_entities()}")
-    pass
 
 
 def test_connect_steam_engine_battery(game):
@@ -740,10 +601,13 @@ def test_connect_steam_engine_battery(game):
 
 def test_get_existing_pipe_connection_group(game):
     """Test existing pipe group return functionality"""
+    import time
+
     pos1 = Position(x=20, y=20)
     pos2 = Position(x=25, y=20)
 
     # First pipe connection
+    start_time = time.time()
     first_pipes = game.connect_entities(pos1, pos2, Prototype.Pipe)
     assert first_pipes, "Initial pipe connection should succeed"
 
@@ -751,48 +615,8 @@ def test_get_existing_pipe_connection_group(game):
     second_pipes = game.connect_entities(pos1, pos2, Prototype.Pipe)
     assert second_pipes, "Second pipe connection should return existing group"
 
-    print("✓ Pipe connection handled gracefully")
-
-
-def test_pipe_retry_logic(game):
-    """Test retry logic for intermittent Lua errors in pipe connections"""
-    pos1 = Position(x=30, y=30)
-    pos2 = Position(x=35, y=30)
-
-    # Multiple connection attempts should all succeed due to retry logic
-    for i in range(3):
-        try:
-            connection = game.connect_entities(pos1, pos2, Prototype.Pipe)
-            assert connection, f"Pipe connection attempt {i + 1} should succeed"
-            break
-        except Exception as e:
-            if "attempt to index field" in str(e):
-                print(
-                    f"Caught expected Lua error on attempt {i + 1}, retry should handle this"
-                )
-            else:
-                raise
-
-    print("✓ Pipe retry logic allows connections to succeed")
-
-
-def test_pipe_performance_no_sleep(game):
-    """Test that pipe connections complete without artificial delays"""
-    import time
-
-    pos1 = Position(x=40, y=40)
-    pos2 = Position(x=50, y=40)
-
-    start_time = time.time()
-    connection = game.connect_entities(pos1, pos2, Prototype.Pipe)
-    end_time = time.time()
-
-    assert connection, "Pipe connection should succeed"
-
     # Connection should complete relatively quickly (no artificial sleep)
-    duration = end_time - start_time
+    duration = time.time() - start_time
     assert duration < 5.0, (
         f"Pipe connection took {duration}s, should be faster without sleep"
     )
-
-    print(f"✓ Pipe connection completed in {duration:.2f}s (performance improved)")

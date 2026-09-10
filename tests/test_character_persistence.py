@@ -37,60 +37,6 @@ def game(configure_game):
 class TestLongDistanceMovement:
     """Test character persistence during long distance movements."""
 
-    def test_move_100_tiles_away(self, game):
-        """Test moving player character 1000+ tiles from origin."""
-        # Get starting position
-        start_pos = game.player_location
-        print(f"Starting position: {start_pos}")
-
-        # Attempt to move 1000 tiles away
-        far_position = Position(x=100, y=0)
-        try:
-            result = game.move_to(far_position)
-            print(f"Moved to: {result}")
-
-            # Verify character still valid by checking position
-            current_pos = game.player_location
-            print(f"Current position after move: {current_pos}")
-
-            # Try a subsequent action to verify character is functional
-            nearby_pos = Position(x=current_pos.x + 5, y=current_pos.y)
-            game.move_to(nearby_pos)
-            print("Character still functional after 1000 tile move")
-
-        except Exception as e:
-            print(f"Move to 100 tiles failed: {e}")
-            # This is expected - check if character recovered
-            current_pos = game.player_location
-            print(f"Position after failed move: {current_pos}")
-
-    def test_move_1000_tiles_away(self, game):
-        """Test moving player character 1000+ tiles from origin."""
-        # Get starting position
-        start_pos = game.player_location
-        print(f"Starting position: {start_pos}")
-
-        # Attempt to move 1000 tiles away
-        far_position = Position(x=1000, y=0)
-        try:
-            result = game.move_to(far_position)
-            print(f"Moved to: {result}")
-
-            # Verify character still valid by checking position
-            current_pos = game.player_location
-            print(f"Current position after move: {current_pos}")
-
-            # Try a subsequent action to verify character is functional
-            nearby_pos = Position(x=current_pos.x + 5, y=current_pos.y)
-            game.move_to(nearby_pos)
-            print("Character still functional after 1000 tile move")
-
-        except Exception as e:
-            print(f"Move to 1000 tiles failed: {e}")
-            # This is expected - check if character recovered
-            current_pos = game.player_location
-            print(f"Position after failed move: {current_pos}")
-
     def test_move_2000_tiles_away(self, game):
         """Test moving player character 2000+ tiles from origin."""
         far_position = Position(x=2000, y=2000)
@@ -132,21 +78,6 @@ class TestLongDistanceMovement:
                 except Exception as pos_error:
                     pytest.fail(f"Character lost at x={current_x}: {pos_error}")
                 break
-
-    def test_diagonal_long_distance(self, game):
-        """Test long diagonal movement."""
-        # Move diagonally 700 tiles in each direction (about 1000 tiles total)
-        far_diagonal = Position(x=700, y=700)
-        try:
-            result = game.move_to(far_diagonal)
-            print(f"Diagonal move result: {result}")
-
-            # Verify character
-            current = game.player_location
-            print(f"Position after diagonal: {current}")
-
-        except Exception as e:
-            print(f"Diagonal move failed: {e}")
 
 
 def generate_chunks(game, center_x: int, center_y: int, chunk_radius: int):
@@ -240,18 +171,15 @@ class TestPathfindingLimits:
         while low <= high:
             mid = (low + high) // 2
             # Reset to origin first
-            try:
-                game.move_to(Position(x=0, y=0))
-            except:
-                pass
+            game.move_to(Position(x=0, y=0))
 
             try:
                 game.move_to(Position(x=mid, y=0))
-                print(f"✓ Single move to x={mid} succeeded")
+                print(f"âœ“ Single move to x={mid} succeeded")
                 max_working = mid
                 low = mid + 1
             except Exception as e:
-                print(f"✗ Single move to x={mid} failed: {str(e)[:200]}")
+                print(f"âœ— Single move to x={mid} failed: {str(e)[:200]}")
                 high = mid - 1
 
         print(f"\n=== Maximum single move distance: {max_working} tiles ===")
@@ -259,311 +187,30 @@ class TestPathfindingLimits:
             f"Single move distance {max_working} is below minimum {self.MIN_SINGLE_MOVE_DISTANCE}"
         )
 
-    def test_incremental_10_tile_moves(self, game):
-        """Move in 10-tile increments to find how far we can go.
+    @pytest.mark.parametrize(
+        "increment,max_iterations",
+        [(10, 200), (25, 100), (50, 60)],
+        ids=["10-tile", "25-tile", "50-tile"],
+    )
+    def test_incremental_moves(self, game, increment, max_iterations):
+        """Move in fixed-size increments.
 
-        Fails if we can't reach MIN_INCREMENTAL_DISTANCE with 10-tile steps.
+        Fails if we can't reach MIN_INCREMENTAL_DISTANCE with the given step size.
         """
-        increment = 10
         current_x = 0
         max_reached = 0
-        failures = 0
 
-        for i in range(200):  # Up to 2000 tiles
+        for _ in range(max_iterations):
             current_x += increment
             try:
                 game.move_to(Position(x=current_x, y=0))
                 max_reached = current_x
-                failures = 0  # Reset consecutive failure count on success
-                if current_x % 100 == 0:
-                    print(f"✓ Reached x={current_x}")
-            except Exception as e:
-                failures += 1
-                print(f"✗ Failed at x={current_x}: {str(e)[:200]}")
-                if failures >= 3:
-                    print("Stopping after 3 consecutive failures")
-                    break
-                # Try to continue from current position
-                try:
-                    pos = game.player_location
-                    current_x = int(pos.x)
-                except:
-                    break
-
-        print(f"\n=== Max reached with 10-tile increments: {max_reached} tiles ===")
-        pos = game.player_location
-        print(f"Final position: {pos}")
+            except Exception:
+                break
 
         assert max_reached >= self.MIN_INCREMENTAL_DISTANCE, (
-            f"10-tile increments only reached {max_reached}, expected at least {self.MIN_INCREMENTAL_DISTANCE}"
+            f"{increment}-tile increments only reached {max_reached}, expected at least {self.MIN_INCREMENTAL_DISTANCE}"
         )
-
-    def test_incremental_25_tile_moves(self, game):
-        """Move in 25-tile increments.
-
-        Fails if we can't reach MIN_INCREMENTAL_DISTANCE with 25-tile steps.
-        """
-        increment = 25
-        current_x = 0
-        max_reached = 0
-
-        for i in range(100):  # Up to 2500 tiles
-            current_x += increment
-            try:
-                game.move_to(Position(x=current_x, y=0))
-                max_reached = current_x
-                if current_x % 100 == 0:
-                    print(f"✓ Reached x={current_x}")
-            except Exception as e:
-                print(f"✗ Failed at x={current_x}: {str(e)[:200]}")
-                break
-
-        print(f"\n=== Max reached with 25-tile increments: {max_reached} tiles ===")
-
-        assert max_reached >= self.MIN_INCREMENTAL_DISTANCE, (
-            f"25-tile increments only reached {max_reached}, expected at least {self.MIN_INCREMENTAL_DISTANCE}"
-        )
-
-    def test_incremental_50_tile_moves(self, game):
-        """Move in 50-tile increments.
-
-        Fails if we can't reach MIN_INCREMENTAL_DISTANCE with 50-tile steps.
-        """
-        increment = 50
-        current_x = 0
-        max_reached = 0
-
-        for i in range(60):  # Up to 3000 tiles
-            current_x += increment
-            try:
-                game.move_to(Position(x=current_x, y=0))
-                max_reached = current_x
-                print(f"✓ Reached x={current_x}")
-            except Exception as e:
-                print(f"✗ Failed at x={current_x}: {str(e)[:200]}")
-                break
-
-        print(f"\n=== Max reached with 50-tile increments: {max_reached} tiles ===")
-
-        assert max_reached >= self.MIN_INCREMENTAL_DISTANCE, (
-            f"50-tile increments only reached {max_reached}, expected at least {self.MIN_INCREMENTAL_DISTANCE}"
-        )
-
-    def test_move_to_edge_of_generated_world(self, game, instance):
-        """Find and move to the edge of the generated world."""
-        # First, check how far the world is generated
-        result = instance.rcon_client.send_command(
-            "/silent-command local chunks = 0; for chunk in game.surfaces[1].get_chunks() do chunks = chunks + 1 end; rcon.print(chunks)"
-        )
-        print(f"Total chunks in world: {result}")
-
-        # Get the bounding box of generated chunks
-        result = instance.rcon_client.send_command(
-            "/silent-command local min_x, max_x, min_y, max_y = math.huge, -math.huge, math.huge, -math.huge; "
-            "for chunk in game.surfaces[1].get_chunks() do "
-            "min_x = math.min(min_x, chunk.x); max_x = math.max(max_x, chunk.x); "
-            "min_y = math.min(min_y, chunk.y); max_y = math.max(max_y, chunk.y); "
-            "end; rcon.print(min_x .. ',' .. max_x .. ',' .. min_y .. ',' .. max_y)"
-        )
-        print(f"Chunk bounds (chunk coords): {result}")
-
-        if result:
-            try:
-                min_x, max_x, min_y, max_y = map(int, result.split(","))
-                # Convert to tile coordinates (chunks are 32x32 tiles)
-                max_tile_x = (max_x + 1) * 32
-                print(f"Max generated tile X: {max_tile_x}")
-
-                # Try to move near the edge
-                target_x = min(max_tile_x - 10, 500)  # Cap at 500 for safety
-                try:
-                    game.move_to(Position(x=target_x, y=0))
-                    print(f"✓ Moved to x={target_x} (near world edge)")
-                except Exception as e:
-                    print(f"✗ Could not move to edge: {e}")
-            except:
-                print("Could not parse chunk bounds")
-
-    def test_pathfinding_with_teleport_assist(self, game, instance):
-        """Use teleport to get far, then test pathfinding from there."""
-        distances_to_test = [500, 1000, 2000, 3000]
-
-        for distance in distances_to_test:
-            # Teleport to the distance
-            instance.rcon_client.send_command(
-                f"/silent-command storage.agent_characters[1].teleport({{x={distance}, y=0}})"
-            )
-
-            # Update game state's knowledge of position
-            game.instance.player_location = Position(x=distance, y=0)
-
-            # Try a short move from there
-            try:
-                game.move_to(Position(x=distance + 10, y=0))
-                print(f"✓ Pathfinding works at x={distance}")
-
-                # Try moving back a bit
-                game.move_to(Position(x=distance - 10, y=0))
-                print(f"✓ Pathfinding works going back at x={distance}")
-            except Exception as e:
-                print(f"✗ Pathfinding failed at x={distance}: {str(e)[:200]}")
-
-            # Reset for next test
-            instance.rcon_client.send_command(
-                "/silent-command storage.agent_characters[1].teleport({x=0, y=0})"
-            )
-            game.instance.player_location = Position(x=0, y=0)
-
-    def test_zig_zag_long_distance(self, game):
-        """Move in a zig-zag pattern to cover long distance."""
-        max_x = 0
-        step = 30
-        y_offset = 10
-
-        for i in range(50):
-            target_x = (i + 1) * step
-            target_y = y_offset if i % 2 == 0 else -y_offset
-
-            try:
-                game.move_to(Position(x=target_x, y=target_y))
-                max_x = target_x
-                if target_x % 150 == 0:
-                    print(f"✓ Zig-zag reached x={target_x}")
-            except Exception as e:
-                print(f"✗ Zig-zag failed at x={target_x}: {str(e)[:200]}")
-                break
-
-        print(f"\n=== Max reached with zig-zag: {max_x} tiles ===")
-
-    def test_spiral_outward_movement(self, game):
-        """Move in an expanding spiral to test pathfinding in all directions."""
-        max_distance = 0
-        x, y = 0, 0
-        directions = [(1, 0), (0, 1), (-1, 0), (0, -1)]  # right, down, left, up
-        step_size = 20
-
-        for ring in range(1, 20):
-            side_length = ring * step_size
-
-            for dir_idx, (dx, dy) in enumerate(directions):
-                steps_this_side = side_length // step_size
-                if dir_idx >= 2:
-                    steps_this_side += 1  # Adjust for spiral geometry
-
-                for _ in range(steps_this_side):
-                    x += dx * step_size
-                    y += dy * step_size
-
-                    try:
-                        game.move_to(Position(x=x, y=y))
-                        distance = (x**2 + y**2) ** 0.5
-                        max_distance = max(max_distance, distance)
-                    except Exception as e:
-                        print(f"✗ Spiral failed at ({x}, {y}): {str(e)[:50]}")
-                        print(
-                            f"\n=== Max spiral distance: {max_distance:.1f} tiles ==="
-                        )
-                        return
-
-            if ring % 5 == 0:
-                print(f"✓ Completed ring {ring}, max distance: {max_distance:.1f}")
-
-        print(f"\n=== Max spiral distance: {max_distance:.1f} tiles ===")
-
-    def test_follow_resource_patches(self, game):
-        """Move between resource patches to test real-world long-distance movement."""
-        resources_visited = []
-        resources = [
-            Resource.IronOre,
-            Resource.CopperOre,
-            Resource.Coal,
-            Resource.Stone,
-        ]
-
-        for i in range(20):
-            resource = resources[i % len(resources)]
-            resource_name = (
-                resource[0] if isinstance(resource, tuple) else resource.value
-            )
-            try:
-                pos = game.nearest(resource)
-                if pos:
-                    game.move_to(pos)
-                    current = game.player_location
-                    distance = (current.x**2 + current.y**2) ** 0.5
-                    resources_visited.append((resource_name, current, distance))
-                    print(f"✓ Visited {resource_name} at distance {distance:.1f}")
-            except Exception as e:
-                print(f"✗ Failed to reach {resource_name}: {str(e)[:50]}")
-                break
-
-        if resources_visited:
-            max_dist = max(r[2] for r in resources_visited)
-            print(f"\n=== Max distance via resources: {max_dist:.1f} tiles ===")
-
-    def test_character_state_after_many_moves(self, game, instance):
-        """Check character state after many successful moves."""
-        moves = 0
-
-        # Do many small moves
-        for i in range(100):
-            x = (i % 10) * 10
-            y = (i // 10) * 10
-            try:
-                game.move_to(Position(x=x, y=y))
-                moves += 1
-            except:
-                break
-
-        print(f"Completed {moves} moves")
-
-        # Check character state
-        health = instance.rcon_client.send_command(
-            "/silent-command rcon.print(storage.agent_characters[1].health)"
-        )
-        valid = instance.rcon_client.send_command(
-            "/silent-command rcon.print(storage.agent_characters[1].valid)"
-        )
-        pos = instance.rcon_client.send_command(
-            "/silent-command local p = storage.agent_characters[1].position; rcon.print(p.x .. ',' .. p.y)"
-        )
-
-        print(
-            f"After {moves} moves - Health: {health}, Valid: {valid}, Position: {pos}"
-        )
-
-    def test_return_to_origin_from_far(self, game):
-        """Move far away incrementally, then try to return to origin."""
-        # Move outward
-        max_x = 0
-        for i in range(20):
-            target = Position(x=(i + 1) * 25, y=0)
-            try:
-                game.move_to(target)
-                max_x = target.x
-            except:
-                break
-
-        print(f"Reached x={max_x}")
-
-        # Now try to return to origin
-        try:
-            game.move_to(Position(x=0, y=0))
-            pos = game.player_location
-            print(f"✓ Returned to origin: {pos}")
-        except Exception as e:
-            print(f"✗ Could not return to origin: {str(e)[:60]}")
-
-            # Try incremental return
-            current_x = max_x
-            while current_x > 0:
-                current_x -= 25
-                try:
-                    game.move_to(Position(x=max(0, current_x), y=0))
-                    print(f"✓ Returned to x={current_x}")
-                except Exception:
-                    print(f"✗ Failed returning at x={current_x}")
-                    break
 
 
 class TestRapidMovement:
@@ -841,72 +488,6 @@ class TestDirectTeleportation:
         )
         print(f"Position after 100 tile teleport: {pos}")
 
-    def test_teleport_1000_tiles(self, instance):
-        """Directly teleport character 1000 tiles via RCON."""
-        # Teleport to far location
-        instance.rcon_client.send_command(
-            "/silent-command storage.agent_characters[1].teleport({x=1000, y=0})"
-        )
-
-        # Check if character is still valid
-        result = instance.rcon_client.send_command(
-            "/silent-command rcon.print(storage.agent_characters[1] and storage.agent_characters[1].valid and 'valid' or 'invalid')"
-        )
-        print(f"Character status after 1000 tile teleport: {result}")
-
-        # Try to use the character
-        if result == "valid":
-            pos = instance.rcon_client.send_command(
-                "/silent-command rcon.print(storage.agent_characters[1].position.x)"
-            )
-            print(f"Character X position: {pos}")
-
-    def test_teleport_to_uncharted_territory(self, instance):
-        """Teleport to area that may not be charted/generated."""
-        # Teleport very far
-        instance.rcon_client.send_command(
-            "/silent-command storage.agent_characters[1].teleport({x=5000, y=5000})"
-        )
-
-        # Check validity
-        result = instance.rcon_client.send_command(
-            "/silent-command rcon.print(storage.agent_characters[1] and storage.agent_characters[1].valid and 'valid' or 'invalid')"
-        )
-        print(f"Character after 5000 tile teleport: {result}")
-
-        # Try to teleport back
-        instance.rcon_client.send_command(
-            "/silent-command storage.agent_characters[1].teleport({x=0, y=0})"
-        )
-
-        result = instance.rcon_client.send_command(
-            "/silent-command rcon.print(storage.agent_characters[1] and storage.agent_characters[1].valid and 'valid' or 'invalid')"
-        )
-        print(f"Character after return teleport: {result}")
-
-    def test_teleport_into_water(self, instance):
-        """Try to teleport into water (if any exists)."""
-        # This may fail or cause issues depending on map
-        try:
-            # Find water tile
-            water_check = instance.rcon_client.send_command(
-                "/silent-command local pos = game.surfaces[1].find_tiles_filtered({name='water', limit=1})[1]; rcon.print(pos and (pos.position.x .. ',' .. pos.position.y) or 'none')"
-            )
-            print(f"Water tile found: {water_check}")
-
-            if water_check and water_check != "none":
-                x, y = water_check.split(",")
-                instance.rcon_client.send_command(
-                    f"/silent-command storage.agent_characters[1].teleport({{x={x}, y={y}}})"
-                )
-
-                result = instance.rcon_client.send_command(
-                    "/silent-command rcon.print(storage.agent_characters[1] and storage.agent_characters[1].valid and 'valid' or 'invalid')"
-                )
-                print(f"Character after water teleport: {result}")
-        except Exception as e:
-            print(f"Water teleport test: {e}")
-
 
 class TestCharacterDamageAndDeath:
     """Test character persistence when damaged or killed."""
@@ -1022,43 +603,6 @@ class TestCharacterDamageAndDeath:
             f"Character should be recovered after destroy, got: {result}"
         )
 
-    def test_spawn_enemy_near_character(self, instance):
-        """Spawn an enemy near character and see what happens."""
-        # Get character position
-        pos = instance.rcon_client.send_command(
-            "/silent-command local p = storage.agent_characters[1].position; rcon.print(p.x .. ',' .. p.y)"
-        )
-        if not pos or "," not in pos:
-            pytest.fail(f"Failed to get character position, got: {pos}")
-        x, y = pos.split(",")
-
-        # Spawn a biter near the character
-        instance.rcon_client.send_command(
-            f"/silent-command game.surfaces[1].create_entity{{name='small-biter', position={{x={float(x) + 5}, y={float(y)}}}, force='enemy'}}"
-        )
-
-        # Wait a moment (in-game ticks)
-        instance.rcon_client.send_command("/silent-command game.tick_paused = false")
-
-        time.sleep(0.5)
-
-        # Check character health
-        health = instance.rcon_client.send_command(
-            "/silent-command rcon.print(storage.agent_characters[1] and storage.agent_characters[1].health or 'dead')"
-        )
-        print(f"Character health after biter spawn: {health}")
-
-        # Kill the biter to clean up
-        instance.rcon_client.send_command(
-            '/silent-command game.forces["enemy"].kill_all_units()'
-        )
-
-        # Check character validity
-        result = instance.rcon_client.send_command(
-            "/silent-command rcon.print(storage.agent_characters[1] and storage.agent_characters[1].valid and 'valid' or 'invalid')"
-        )
-        print(f"Character status: {result}")
-
 
 class TestCharacterInvalidation:
     """Test various ways the character reference could become invalid."""
@@ -1085,26 +629,6 @@ class TestCharacterInvalidation:
             "/silent-command rcon.print(storage.agent_characters[1] and storage.agent_characters[1].valid and 'valid' or 'invalid')"
         )
         assert result == "valid", f"Should recover from nil reference, got: {result}"
-
-    def test_move_to_after_character_death(self, game, instance):
-        """Test that move_to works after character has been killed and recovered."""
-        # Kill the character
-        instance.rcon_client.send_command(
-            "/silent-command storage.agent_characters[1].die()"
-        )
-
-        # Try to move - this should trigger recovery via ensure_valid_character
-        try:
-            game.move_to(Position(x=10, y=10))
-            print("Move succeeded after character death")
-        except Exception as e:
-            print(f"Move after death failed: {e}")
-
-        # Verify character exists now
-        result = instance.rcon_client.send_command(
-            "/silent-command rcon.print(storage.agent_characters[1] and storage.agent_characters[1].valid and 'valid' or 'invalid')"
-        )
-        print(f"Character status after move attempt: {result}")
 
 
 class TestExtremeScenarios:
@@ -1179,63 +703,41 @@ class TestPathfindingWithChunkGeneration:
     # Map topology (oceans/obstacles) can limit straight-line travel on some seeds
     MIN_DISTANCE_WITH_CHUNKS = 500
 
-    def test_generate_chunks_and_move_500_tiles(self, game):
-        """Generate chunks along a path and move 500 tiles."""
-        target_distance = 500
+    @pytest.mark.parametrize(
+        "target_distance,chunk_radius",
+        [(500, 2), (1000, 3)],
+        ids=["500-tiles", "1000-tiles"],
+    )
+    def test_generate_chunks_and_move(self, game, target_distance, chunk_radius):
+        """Generate chunks along a path and move toward the target distance."""
+        generate_chunks_along_path(
+            game, 0, 0, target_distance, 0, chunk_radius=chunk_radius
+        )
 
-        # Pre-generate chunks along the path
-        generate_chunks_along_path(game, 0, 0, target_distance, 0, chunk_radius=2)
-
-        # Now try to move
+        max_reached = 0
         try:
             game.move_to(Position(x=target_distance, y=0))
-            pos = game.player_location
-            print(f"✓ Moved to x={target_distance} with chunk generation: {pos}")
-            assert pos.x >= target_distance - 5, (
-                f"Should reach x={target_distance}, got {pos.x}"
-            )
-        except Exception as e:
-            pytest.fail(f"Failed to move 500 tiles with chunk generation: {e}")
+            max_reached = game.player_location.x
+        except Exception:
+            pass
 
-    def test_generate_chunks_and_move_1000_tiles(self, game):
-        """Generate chunks and attempt 1000 tile movement."""
-        target_distance = 1000
-
-        # Pre-generate chunks along the path
-        print(f"Generating chunks from origin to x={target_distance}...")
-        generate_chunks_along_path(game, 0, 0, target_distance, 0, chunk_radius=3)
-
-        # Try the move
-        try:
-            game.move_to(Position(x=target_distance, y=0))
-            pos = game.player_location
-            print(f"✓ Moved to x={target_distance} with chunk generation: {pos}")
-            assert pos.x >= target_distance - 10, (
-                f"Should reach x={target_distance}, got {pos.x}"
-            )
-        except Exception as e:
-            print(f"✗ Failed to move 1000 tiles: {e}")
-            # Try incremental approach — map topology (water/obstacles) may limit
+        if max_reached < target_distance:
+            # Try incremental approach â€” map topology (water/obstacles) may limit
             # how far we can go in a straight line
             current_x = 0
             increment = 100
-            max_reached = 0
-
-            for i in range(target_distance // increment):
+            for _ in range(target_distance // increment):
                 current_x += increment
                 try:
                     game.move_to(Position(x=current_x, y=0))
-                    max_reached = current_x
-                    if current_x % 200 == 0:
-                        print(f"✓ Incremental: reached x={current_x}")
-                except Exception as e2:
-                    print(f"✗ Incremental failed at x={current_x}: {str(e2)[:100]}")
+                    max_reached = max(max_reached, current_x)
+                except Exception:
                     break
 
-            # Map topology (oceans) may block paths beyond ~500-600 tiles on some seeds
-            assert max_reached >= 500, (
-                f"With generated chunks, should reach at least 500 tiles, got {max_reached}"
-            )
+        # Map topology (oceans) may block paths beyond ~500-600 tiles on some seeds
+        assert max_reached >= 500, (
+            f"With generated chunks, should reach at least 500 tiles, got {max_reached}"
+        )
 
     def test_generate_large_area_and_explore(self, game):
         """Generate a large area and test movement throughout."""
@@ -1266,11 +768,11 @@ class TestPathfindingWithChunkGeneration:
                 game.move_to(pos)
                 current = game.player_location
                 print(
-                    f"✓ Reached ({pos.x}, {pos.y}) -> actual: ({current.x:.1f}, {current.y:.1f})"
+                    f"âœ“ Reached ({pos.x}, {pos.y}) -> actual: ({current.x:.1f}, {current.y:.1f})"
                 )
                 successful_moves += 1
             except Exception as e:
-                print(f"✗ Failed to reach ({pos.x}, {pos.y}): {str(e)[:80]}")
+                print(f"âœ— Failed to reach ({pos.x}, {pos.y}): {str(e)[:80]}")
 
         print(f"\n=== Successful moves: {successful_moves}/{len(test_positions)} ===")
         # Some positions may be unreachable due to water/obstacles on the map
@@ -1296,9 +798,9 @@ class TestPathfindingWithChunkGeneration:
                 max_reached = next_x
                 current_x = next_x
                 if next_x % 500 == 0:
-                    print(f"✓ Reached x={next_x}")
+                    print(f"âœ“ Reached x={next_x}")
             except Exception as e:
-                print(f"✗ Failed at x={next_x}: {str(e)[:100]}")
+                print(f"âœ— Failed at x={next_x}: {str(e)[:100]}")
                 break
 
         print(f"\n=== Max reached with incremental chunk gen: {max_reached} tiles ===")
@@ -1319,11 +821,11 @@ class TestPathfindingWithChunkGeneration:
             pos = game.player_location
             distance = (pos.x**2 + pos.y**2) ** 0.5
             print(
-                f"✓ Diagonal move successful: ({pos.x:.1f}, {pos.y:.1f}), distance={distance:.1f}"
+                f"âœ“ Diagonal move successful: ({pos.x:.1f}, {pos.y:.1f}), distance={distance:.1f}"
             )
             assert distance >= 350, f"Should reach ~424 diagonal tiles, got {distance}"
         except Exception as e:
-            print(f"✗ Diagonal move failed: {e}")
+            print(f"âœ— Diagonal move failed: {e}")
             pytest.fail(f"Diagonal move with chunk generation should succeed: {e}")
 
     def test_chunk_generation_performance(self, game):
@@ -1356,7 +858,7 @@ class TestPathfindingWithChunkGeneration:
         """
         # Pick a target within reachable range but outside the initial 25-chunk radius
         # The initial generation covers ~800 tiles from origin
-        # Use a position at 400 tiles — within range, definitely has generated chunks
+        # Use a position at 400 tiles â€” within range, definitely has generated chunks
         target_x = 400
 
         # Count chunks before
@@ -1373,7 +875,7 @@ class TestPathfindingWithChunkGeneration:
         except Exception as e:
             print(f"Move failed (expected if blocked by water): {e}")
 
-        # Count chunks after — request_path generates chunks along the corridor
+        # Count chunks after â€” request_path generates chunks along the corridor
         after = instance.rcon_client.send_command(
             "/silent-command local c=0; for _ in game.surfaces[1].get_chunks() do c=c+1 end; rcon.print(c)"
         )

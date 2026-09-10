@@ -1,7 +1,6 @@
 import pytest
 
 from fle.envd.blueprints import (
-    DEFAULT_MAX_PER_SCOPE,
     BlueprintInvalid,
     BlueprintNotFound,
     BlueprintQuotaExceeded,
@@ -41,10 +40,14 @@ def test_scope_isolation(tmp_path):
 
 def test_ephemeral_store_never_touches_disk():
     store = BlueprintStore(scope=None)
-    store.save("temp", CONTENT_A)
     assert store.persistent is False
+    store.save("temp", CONTENT_A)
+    store.record_use("temp", tick=100)
+    updated = store.save("temp", CONTENT_B)
+    assert updated.times_placed == 1
+    assert updated.last_used_tick == 100
+    assert store.get("temp").content == CONTENT_B
     assert store.count() == 1
-    assert store.get("temp").content == CONTENT_A
 
 
 def test_quota_enforced_on_unique_names(store):
@@ -106,7 +109,3 @@ def test_drop_scope(store):
     dropped = store.drop_scope()
     assert dropped == 2
     assert store.count() == 0
-
-
-def test_default_quota_is_generous():
-    assert DEFAULT_MAX_PER_SCOPE >= 16

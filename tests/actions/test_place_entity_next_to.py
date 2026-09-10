@@ -611,25 +611,17 @@ def test_collision_resolution_alternatives(game):
     # Block preferred position
     game.place_entity(Prototype.WoodenChest, position=Position(x=72, y=70))
 
-    try:
-        inserter = game.place_entity_next_to(
-            Prototype.BurnerInserter,
-            reference_position=assembler.position,
-            direction=Direction.RIGHT,  # Blocked direction
-            spacing=0,
-        )
+    inserter = game.place_entity_next_to(
+        Prototype.BurnerInserter,
+        reference_position=assembler.position,
+        direction=Direction.RIGHT,  # Blocked direction
+        spacing=0,
+    )
 
-        if inserter:
-            # Should find alternative, not at blocked position
-            blocked_pos = Position(x=72, y=70)
-            assert not inserter.position.is_close(blocked_pos, tolerance=0.1), (
-                "Should not place at blocked position"
-            )
-            print(f"✓ Found alternative at {inserter.position}")
-
-    except Exception as e:
-        # Should give helpful suggestions
-        print(f"✓ Got collision resolution guidance: {e}")
+    blocked_pos = Position(x=72, y=70)
+    assert not inserter.position.is_close(blocked_pos, tolerance=0.1), (
+        "Should find alternative, not blocked position"
+    )
 
 
 def test_size_detection_accuracy(game):
@@ -739,21 +731,6 @@ def test_belt_placement_with_smart_routing(game):
 
     assert belt, "Belt placement with smart routing should succeed"
 
-    # Test that multiple belts can be chained
-    try:
-        belt2 = game.place_entity_next_to(
-            Prototype.TransportBelt,
-            reference_position=belt.position,
-            direction=Direction.RIGHT,
-            spacing=0,
-        )
-
-        if belt2:
-            print("Belt chaining successful with smart placement")
-
-    except Exception as e:
-        print(f"Belt chaining issue (may be expected due to space): {e}")
-
 
 def test_item_on_ground_clearance(game):
     """Test that item-on-ground entities are cleared before placement"""
@@ -809,41 +786,6 @@ def test_placement_feedback_system(game):
             print("✓ Inserter was auto-oriented for optimal flow")
     else:
         print("Note: Placement feedback not attached to entity (may be in logs only)")
-
-
-def test_auto_orientation_verification(game):
-    """Test that inserters are automatically oriented for optimal flow"""
-    game.move_to(Position(x=140, y=140))
-
-    # Place furnace
-    furnace = game.place_entity(Prototype.StoneFurnace, position=Position(x=140, y=140))
-    assert furnace, "Failed to place furnace"
-
-    # Place input inserter (should face towards furnace)
-    input_inserter = game.place_entity_next_to(
-        Prototype.BurnerInserter,
-        reference_position=furnace.position,
-        direction=Direction.LEFT,
-        spacing=0,
-    )
-
-    assert input_inserter, "Failed to place input inserter"
-
-    # Place output inserter (should face away from furnace)
-    output_inserter = game.place_entity_next_to(
-        Prototype.BurnerInserter,
-        reference_position=furnace.position,
-        direction=Direction.RIGHT,
-        spacing=0,
-    )
-
-    assert output_inserter, "Failed to place output inserter"
-
-    print(f"✓ Input inserter direction: {input_inserter.direction}")
-    print(f"✓ Output inserter direction: {output_inserter.direction}")
-
-    # Verify inserters have different orientations (auto-oriented)
-    # The exact directions may vary, but they should be optimal for the factory pattern
 
 
 def test_factory_pattern_recognition_details(game):
@@ -945,54 +887,6 @@ def test_large_entity_reserved_slots_details(game):
         )
 
     print("✓ Large entity reserved slots working correctly")
-
-
-def test_collision_resolution_with_helpful_errors(game):
-    """Test that collision resolution provides helpful error messages"""
-    game.move_to(Position(x=220, y=220))
-
-    # Place assembler
-    assembler = game.place_entity(
-        Prototype.AssemblingMachine1, position=Position(x=220, y=220)
-    )
-
-    # Block multiple positions to force helpful error
-    game.place_entity(
-        Prototype.SmallElectricPole, position=Position(x=222, y=220)
-    )  # East
-    game.place_entity(
-        Prototype.SmallElectricPole, position=Position(x=218, y=220)
-    )  # West
-
-    try:
-        # Try to place inserter - should get helpful error about large entities and poles
-        inserter = game.place_entity_next_to(
-            Prototype.BurnerInserter,
-            reference_position=assembler.position,
-            direction=Direction.RIGHT,
-            spacing=0,
-        )
-
-        # If it succeeds, it found a good alternative
-        if inserter:
-            print(f"✓ Found alternative position: {inserter.position}")
-
-    except Exception as e:
-        error_msg = str(e).lower()
-        helpful_keywords = [
-            "large entities",
-            "corner",
-            "pole",
-            "spacing",
-            "direction",
-            "consider",
-            "middle sides",
-            "connect_entities",
-        ]
-
-        found_helpful = any(keyword in error_msg for keyword in helpful_keywords)
-        assert found_helpful, f"Error should provide helpful suggestions: {e}"
-        print("✓ Got helpful error message with suggestions")
 
 
 def test_alternative_position_scoring(game):

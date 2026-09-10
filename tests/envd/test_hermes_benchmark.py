@@ -46,7 +46,6 @@ def _attempt(task, *, success=True, status="completed", index=0, reward=1.0, **e
 
 
 def _run(run_id, model, attempts, **run_overrides):
-    task = get_benchmark_task("micro_place_lab_v1")
     started = datetime(2026, 8, 23, tzinfo=timezone.utc)
     values = {
         "run_id": run_id,
@@ -75,29 +74,71 @@ def test_prompt_uses_canonical_task_builder_reference():
     assert "--max-turns" not in prompt
 
 
-def test_profile_isolated_and_allowlists_only_factorio(tmp_path):
+@pytest.mark.parametrize(
+    ("profile_kwargs", "expected"),
+    [
+        pytest.param(
+            {"max_turns": 7},
+            {
+                "platform_toolsets": {"cli": ["factorio"]},
+                "mcp_servers": lambda servers, tmp_path: list(servers) == ["factorio"],
+                "mcp_servers.factorio.env.LEASE_ID": "lease-123",
+                "agent.api_max_retries": 3,
+                "agent.disabled_toolsets": lambda toolsets, tmp_path: "web" in toolsets,
+                "platform_toolsets.cli": lambda cli, tmp_path: "web" not in cli
+                and "terminal" not in cli,
+            },
+            id="isolated_and_allowlists_only_factorio",
+        ),
+        pytest.param(
+            {"max_turns": None},
+            {"agent.max_turns": lambda turns, tmp_path: turns is None},
+            id="contract_profile_has_no_turn_budget",
+        ),
+        pytest.param(
+            {"max_turns": None, "terminal_file": True, "api_max_retries": 12},
+            {
+                "mcp_servers.factorio.env.MCP_TERMINAL_FILE": lambda path,
+                tmp_path: path == str(tmp_path / "terminal.json"),
+                "agent.api_max_retries": 12,
+            },
+            id="epoch_terminal_signal",
+        ),
+        pytest.param(
+            {"max_turns": None, "compression_enabled": True},
+            {"compression": {"enabled": True, "threshold": 0.50}},
+            id="compaction_enabled_for_persistent_sessions",
+        ),
+    ],
+)
+def test_written_hermes_profile_matches_requested_configuration(
+    tmp_path, profile_kwargs, expected
+):
     profile = tmp_path / "profile"
     scratch = tmp_path / "scratch"
-    trace = scratch / "trace.log"
     hermes_benchmark._write_hermes_profile(
-        profile, scratch, "http://envd", "lease-123", trace, max_turns=7
+        profile,
+        scratch,
+        "http://envd",
+        "lease-123",
+        scratch / "trace.log",
+        **{
+            name: tmp_path / "terminal.json" if name == "terminal_file" else value
+            for name, value in profile_kwargs.items()
+        },
     )
-
-    import json
-
     config = json.loads((profile / "config.yaml").read_text(encoding="utf-8"))
-    assert config["platform_toolsets"] == {"cli": ["factorio"]}
-    assert list(config["mcp_servers"]) == ["factorio"]
-    assert config["mcp_servers"]["factorio"]["env"]["LEASE_ID"] == "lease-123"
-    assert config["agent"]["api_max_retries"] == 3
-    assert "web" in config["agent"]["disabled_toolsets"]
-    assert "web" not in config["platform_toolsets"]["cli"]
-    assert "terminal" not in config["platform_toolsets"]["cli"]
+    for path, expected_value in expected.items():
+        node = config
+        for part in path.split("."):
+            node = node[part]
+        if callable(expected_value):
+            assert expected_value(node, tmp_path), path
+        else:
+            assert node == expected_value, path
 
 
-def test_contract_profile_has_no_turn_budget(tmp_path):
-    import json
-
+def test_contract_sessions_ignore_the_turn_budget():
     from fle.envd.models import (
         CustomerContractSpec,
         DemandOrderSpec,
@@ -121,56 +162,6 @@ def test_contract_profile_has_no_turn_budget(tmp_path):
     )
     assert hermes_benchmark._effective_max_turns(spec, 24) is None
 
-    profile = tmp_path / "profile"
-    scratch = tmp_path / "scratch"
-    hermes_benchmark._write_hermes_profile(
-        profile,
-        scratch,
-        "http://envd",
-        "lease-123",
-        scratch / "trace.log",
-        max_turns=None,
-    )
-    config = json.loads((profile / "config.yaml").read_text(encoding="utf-8"))
-    assert config["agent"]["max_turns"] is None
-
-
-def test_profile_passes_epoch_terminal_signal_to_mcp(tmp_path):
-    profile = tmp_path / "profile"
-    scratch = tmp_path / "scratch"
-    terminal = tmp_path / "terminal.json"
-    hermes_benchmark._write_hermes_profile(
-        profile,
-        scratch,
-        "http://envd",
-        "lease-123",
-        scratch / "trace.log",
-        max_turns=None,
-        terminal_file=terminal,
-        api_max_retries=12,
-    )
-    config = json.loads((profile / "config.yaml").read_text(encoding="utf-8"))
-    assert config["mcp_servers"]["factorio"]["env"]["MCP_TERMINAL_FILE"] == str(
-        terminal
-    )
-    assert config["agent"]["api_max_retries"] == 12
-
-
-def test_profile_can_enable_compaction_for_persistent_sessions(tmp_path):
-    profile = tmp_path / "profile"
-    scratch = tmp_path / "scratch"
-    hermes_benchmark._write_hermes_profile(
-        profile,
-        scratch,
-        "http://envd",
-        "lease-123",
-        scratch / "trace.log",
-        max_turns=None,
-        compression_enabled=True,
-    )
-    config = json.loads((profile / "config.yaml").read_text(encoding="utf-8"))
-    assert config["compression"] == {"enabled": True, "threshold": 0.50}
-
 
 def test_usage_fallback_does_not_double_count_json_and_hit_rate_is_bounded(tmp_path):
     output = '{"input_tokens": 100, "cache_read_tokens": 25}\n'
@@ -183,34 +174,48 @@ def test_usage_fallback_does_not_double_count_json_and_hit_rate_is_bounded(tmp_p
     )
 
 
-def test_nonzero_exit_classifies_provider_and_parser_failures():
-    assert hermes_benchmark._classify_nonzero_exit(1, "HTTP 429 quota exceeded")[0] == (
-        "provider_quota"
-    )
-    assert hermes_benchmark._classify_nonzero_exit(2, "invalid JSON tool call")[0] == (
-        "parser_error"
-    )
+@pytest.mark.parametrize(
+    ("classify", "output", "expected"),
+    [
+        pytest.param(
+            lambda output: hermes_benchmark._classify_nonzero_exit(1, output),
+            "HTTP 429 quota exceeded",
+            ("provider_quota", "provider quota or rate limit"),
+            id="nonzero_exit_provider_quota",
+        ),
+        pytest.param(
+            lambda output: hermes_benchmark._classify_nonzero_exit(2, output),
+            "invalid JSON tool call",
+            ("parser_error", "Hermes/model output could not be parsed"),
+            id="nonzero_exit_parser_error",
+        ),
+        pytest.param(
+            hermes_benchmark._classify_output_failure,
+            "API call failed after 3 retries: HTTP 429 free-models-per-day",
+            ("provider_quota", "provider quota or rate limit"),
+            id="output_failure_provider_quota",
+        ),
+        pytest.param(
+            hermes_benchmark._classify_output_failure,
+            '{"name":"tool_call","args":{"arguments":{"code":"print(1)"}}}',
+            ("parser_error", "model tool call was returned as assistant text"),
+            id="output_failure_parser_error",
+        ),
+        pytest.param(
+            hermes_benchmark._classify_output_failure,
+            "No reply: the model returned empty content after retries",
+            ("provider_error", "provider or transport error"),
+            id="output_failure_provider_error",
+        ),
+    ],
+)
+def test_failure_classification_covers_exit_and_output_channels(
+    classify, output, expected
+):
+    assert classify(output) == expected
 
 
-def test_success_exit_still_classifies_provider_and_raw_tool_call_failures():
-    quota = "API call failed after 3 retries: HTTP 429 free-models-per-day"
-    assert hermes_benchmark._classify_output_failure(quota) == (
-        "provider_quota",
-        "provider quota or rate limit",
-    )
-    raw_call = '{"name":"tool_call","args":{"arguments":{"code":"print(1)"}}}'
-    assert hermes_benchmark._classify_output_failure(raw_call) == (
-        "parser_error",
-        "model tool call was returned as assistant text",
-    )
-    empty_reply = "No reply: the model returned empty content after retries"
-    assert hermes_benchmark._classify_output_failure(empty_reply) == (
-        "provider_error",
-        "provider or transport error",
-    )
-
-
-def test_hermes_uses_one_shot_usage_file_and_isolated_home(monkeypatch, tmp_path):
+def test_hermes_uses_one_shot_and_resume_invocation_flags(monkeypatch, tmp_path):
     calls = {}
 
     class Process:
@@ -239,45 +244,27 @@ def test_hermes_uses_one_shot_usage_file_and_isolated_home(monkeypatch, tmp_path
     )
 
     assert invocation.failure_category is None
-    assert "-z" in calls["command"]
-    assert "--usage-file" in calls["command"]
-    assert "--toolsets" in calls["command"]
-    assert "factorio" in calls["command"]
+    command = calls["command"]
+    assert "-z" in command
+    assert "--usage-file" in command
+    assert command[command.index("--toolsets") + 1] == "factorio"
     assert calls["kwargs"]["env"]["HERMES_HOME"] == str(profile)
 
-
-def test_hermes_can_resume_latest_isolated_session(monkeypatch, tmp_path):
-    calls = {}
-
-    class Process:
-        pid = 321
-        returncode = 0
-        stdout = None
-        stderr = None
-
-        def communicate(self, timeout=None):
-            return "continued", ""
-
-    def fake_popen(command, **kwargs):
-        calls["command"] = command
-        return Process()
-
-    monkeypatch.setattr(hermes_benchmark.subprocess, "Popen", fake_popen)
-    scratch = tmp_path / "scratch"
-    invocation = hermes_benchmark._run_hermes(
-        tmp_path / "profile",
+    resumed = hermes_benchmark._run_hermes(
+        profile,
         scratch,
-        scratch / "usage.json",
+        usage,
         "next order",
         "stealth/ox-alpha",
         _args(),
         resume_latest=True,
     )
 
-    assert invocation.failure_category is None
-    assert calls["command"][calls["command"].index("--resume") + 1] == "latest"
-    assert calls["command"][calls["command"].index("--in") + 1] == str(scratch)
-    assert calls["command"][calls["command"].index("--toolsets") + 1] == "factorio"
+    assert resumed.failure_category is None
+    command = calls["command"]
+    assert command[command.index("--resume") + 1] == "latest"
+    assert command[command.index("--in") + 1] == str(scratch)
+    assert command[command.index("--toolsets") + 1] == "factorio"
 
 
 def test_hermes_timeout_terminates_the_process_tree(monkeypatch, tmp_path):
@@ -348,7 +335,7 @@ def test_harness_failures_are_excluded_from_summary_and_ladder():
     assert row["excluded_attempt_count"] == 1
 
 
-def test_ladder_does_not_pair_incompatible_generation_conditions():
+def test_ladder_does_not_pair_mismatched_runs():
     task = get_benchmark_task("micro_place_lab_v1")
     first = _run("first", "alpha", [_attempt(task, reward=1.0)])
     second = _run(
@@ -363,20 +350,15 @@ def test_ladder_does_not_pair_incompatible_generation_conditions():
     assert rows["test/alpha"]["elo"] == 1200.0
     assert rows["test/beta"]["elo"] == 1200.0
 
-
-def test_ladder_does_not_pair_unequal_attempt_plans():
-    task = get_benchmark_task("micro_place_lab_v1")
-    first = _run("first", "alpha", [_attempt(task, index=0, reward=1.0)])
-    second = _run(
-        "second",
+    uneven = _run(
+        "third",
         "beta",
         [
             _attempt(task, index=0, reward=0.0),
             _attempt(task, index=1, reward=0.0),
         ],
     )
-    ladder = build_capability_ladder([first, second])
-    assert ladder["game_count"] == 0
+    assert build_capability_ladder([first, uneven])["game_count"] == 0
 
 
 def test_hermes_writes_one_run_and_summary_per_model(monkeypatch, tmp_path):

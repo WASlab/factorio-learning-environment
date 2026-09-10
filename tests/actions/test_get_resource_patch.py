@@ -1,7 +1,6 @@
 import pytest
 
 from fle.env import ResourcePatch
-from fle.env import FactorioInstance
 from fle.env.game_types import Resource
 
 
@@ -10,89 +9,36 @@ def game(configure_game):
     return configure_game(inventory={"iron-chest": 1})
 
 
-def test_get_resource_patch(game: FactorioInstance):
+@pytest.mark.parametrize(
+    "resource,check_bbox_order",
+    [
+        (Resource.Coal, True),
+        (Resource.Water, True),
+        (Resource.Wood, False),
+    ],
+)
+def test_get_resource_patch(game, resource, check_bbox_order):
     """
-    Find the nearest coal resource patch and harvest 5 coal from it.
+    Get the nearest resource patch and verify its reported bounding box.
     :param game:
     :return:
     """
     resource_patch: ResourcePatch = game.get_resource_patch(
-        Resource.Coal, game.nearest(Resource.Coal)
+        resource, game.nearest(resource)
     )
 
-    assert resource_patch.name == Resource.Coal[0]
+    assert resource_patch.name == resource[0]
     assert resource_patch.size > 0
     assert resource_patch.bounding_box.left_top.x
     assert resource_patch.bounding_box.right_bottom.x
     assert resource_patch.bounding_box.left_top.y
     assert resource_patch.bounding_box.right_bottom.y
-    assert (
-        resource_patch.bounding_box.left_top.x
-        < resource_patch.bounding_box.right_bottom.x
-    )
-    assert (
-        resource_patch.bounding_box.left_top.y
-        < resource_patch.bounding_box.right_bottom.y
-    )
-    assert (
-        resource_patch.bounding_box.left_top.x
-        < resource_patch.bounding_box.right_bottom.x
-    )
-    assert (
-        resource_patch.bounding_box.left_top.y
-        < resource_patch.bounding_box.right_bottom.y
-    )
-
-
-def test_get_water_patch(game: FactorioInstance):
-    """
-    Verify that an exception is raised when trying to get a resource patch that does not exist at a given position.
-    :param game:
-    :return:
-    """
-    resource_patch: ResourcePatch = game.get_resource_patch(
-        Resource.Water, game.nearest(Resource.Water)
-    )
-    assert resource_patch.name == Resource.Water[0]
-    assert resource_patch.size > 0
-    assert resource_patch.bounding_box.left_top.x
-    assert resource_patch.bounding_box.right_bottom.x
-    assert resource_patch.bounding_box.left_top.y
-    assert resource_patch.bounding_box.right_bottom.y
-    assert (
-        resource_patch.bounding_box.left_top.x
-        < resource_patch.bounding_box.right_bottom.x
-    )
-    assert (
-        resource_patch.bounding_box.left_top.y
-        < resource_patch.bounding_box.right_bottom.y
-    )
-    assert (
-        resource_patch.bounding_box.left_top.x
-        < resource_patch.bounding_box.right_bottom.x
-    )
-    assert (
-        resource_patch.bounding_box.left_top.y
-        < resource_patch.bounding_box.right_bottom.y
-    )
-
-
-def test_get_tree_resource_patch(game: FactorioInstance):
-    """
-    Verify that an exception is raised when trying to get a resource patch that does not exist at a given position.
-    :param game:
-    :return:
-    """
-    resource_patch: ResourcePatch = game.get_resource_patch(
-        Resource.Wood, game.nearest(Resource.Wood)
-    )
-    assert resource_patch.name == Resource.Wood[0]
-    assert resource_patch.size > 0
-    assert resource_patch.bounding_box.left_top.x
-    assert resource_patch.bounding_box.right_bottom.x
-    assert resource_patch.bounding_box.left_top.y
-    assert resource_patch.bounding_box.right_bottom.y
-    # assert resource_patch.bounding_box.left_top.x < resource_patch.bounding_box.right_bottom.x
-    # assert resource_patch.bounding_box.left_top.y < resource_patch.bounding_box.right_bottom.y
-    # assert resource_patch.bounding_box.left_top.x < resource_patch.bounding_box.right_bottom.x
-    # assert resource_patch.bounding_box.left_top.y < resource_patch.bounding_box.right_bottom.y
+    if check_bbox_order:
+        assert (
+            resource_patch.bounding_box.left_top.x
+            < resource_patch.bounding_box.right_bottom.x
+        )
+        assert (
+            resource_patch.bounding_box.left_top.y
+            < resource_patch.bounding_box.right_bottom.y
+        )

@@ -22,11 +22,8 @@ def test_fail_to_craft_item(game):
     :param game:
     :return:
     """
-
-    try:
+    with pytest.raises(Exception):
         game.craft_item(Prototype.IronChest, quantity=100)
-    except Exception:
-        assert True
 
 
 def test_craft_with_full_inventory(game):

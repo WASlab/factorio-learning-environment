@@ -242,71 +242,46 @@ class _AuditWorker(FakeWorker):
         self.accepted.append(result)
 
 
-def test_service_passes_candidate_audit_and_terminates_immediately():
+@pytest.mark.parametrize("passed", [True, False], ids=["passed", "failed"])
+def test_service_candidate_audit_outcome_controls_rollout(passed):
     agent = _CandidateWorker()
-    auditor = _AuditWorker(lambda calls: _audit_result(passed=True, calls=calls))
+    auditor = _AuditWorker(lambda calls: _audit_result(passed=passed, calls=calls))
     service = EnvironmentService([agent], audit_workers=[auditor])
     lease = service.lease(FactorioTaskSpec(task_id="throughput", goal="produce"))
 
     result = service.execute(lease.lease_id, "step()")
+    if passed:
+        with pytest.raises(LeaseFinalized, match="throughput_audit_passed"):
+            service.execute(lease.lease_id, "step_again()")
+        snapshot = service.finalize(lease.lease_id)
+        assert snapshot.action_events[0].sequence == 1
+    else:
+        continued = service.execute(lease.lease_id, "step_again()")
+        assert continued.event.sequence == 2
 
     audit_event = next(
         event
         for event in result.events
-        if event.payload.get("event") == "throughput_audit_passed"
+        if event.payload.get("event")
+        == ("throughput_audit_passed" if passed else "throughput_audit_failed")
     )
     assert audit_event.payload == {
-        "event": "throughput_audit_passed",
-        "failure_reasons": [],
-        "line_scores": {"iron-plate": 1.0},
+        "event": "throughput_audit_passed" if passed else "throughput_audit_failed",
+        "failure_reasons": [] if passed else ["failed-attempt-1"],
+        "line_scores": {"iron-plate": 1.0 if passed else 0.0},
         "production_rates_per_minute": {"iron-plate": 200.0},
         "depot_rates_per_minute": {"iron-plate": 200.0},
         "minimum_production_subwindow_rates": {"iron-plate": 200.0},
         "minimum_depot_subwindow_rates": {"iron-plate": 200.0},
     }
-    assert result.terminal_reason == "throughput_audit_passed"
-    assert auditor.calls == 1
-    assert len(agent.recorded) == 1
-    assert agent.recorded[0].passed is True
-    assert len(agent.accepted) == 1
-    assert agent.accepted[0] is agent.recorded[0]
-    with pytest.raises(LeaseFinalized, match="throughput_audit_passed"):
-        service.execute(lease.lease_id, "step_again()")
-
-    snapshot = service.finalize(lease.lease_id)
-    assert snapshot.action_events[0].sequence == 1
-    service.close()
-
-
-def test_service_keeps_rollout_open_when_candidate_audit_fails():
-    agent = _CandidateWorker()
-    auditor = _AuditWorker(lambda calls: _audit_result(passed=False, calls=calls))
-    service = EnvironmentService([agent], audit_workers=[auditor])
-    lease = service.lease(FactorioTaskSpec(task_id="throughput", goal="produce"))
-
-    failed = service.execute(lease.lease_id, "step()")
-    continued = service.execute(lease.lease_id, "step_again()")
-
-    audit_event = next(
-        event
-        for event in failed.events
-        if event.payload.get("event") == "throughput_audit_failed"
-    )
-    assert audit_event.payload == {
-        "event": "throughput_audit_failed",
-        "failure_reasons": ["failed-attempt-1"],
-        "line_scores": {"iron-plate": 0.0},
-        "production_rates_per_minute": {"iron-plate": 200.0},
-        "depot_rates_per_minute": {"iron-plate": 200.0},
-        "minimum_production_subwindow_rates": {"iron-plate": 200.0},
-        "minimum_depot_subwindow_rates": {"iron-plate": 200.0},
-    }
-    assert failed.terminal_reason is None
-    assert continued.event.sequence == 2
-    assert auditor.calls == 2
-    assert len(agent.recorded) == 2
-    assert all(not audit.passed for audit in agent.recorded)
-    assert agent.accepted == []
+    assert result.terminal_reason == ("throughput_audit_passed" if passed else None)
+    assert auditor.calls == (1 if passed else 2)
+    assert len(agent.recorded) == (1 if passed else 2)
+    assert all(audit.passed is passed for audit in agent.recorded)
+    if passed:
+        assert agent.accepted[0] is agent.recorded[0]
+    else:
+        assert agent.accepted == []
     service.close()
 
 

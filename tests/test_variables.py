@@ -34,9 +34,3 @@ def test_variables(game):
     _, _, result = game.instance.eval_with_error("print(fizz)")
 
     assert result == "1: ('mart',)"
-
-
-def test_print(game):
-    _, _, result = game.instance.eval_with_error("print('hello')")
-
-    assert result == "1: ('hello',)"

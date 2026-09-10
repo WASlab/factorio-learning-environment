@@ -45,28 +45,19 @@ def test_insert_iron_ore_into_stone_furnace(game):
     assert furnace.furnace_source[Prototype.IronOre] == 10
 
 
-def test_insert_iron_ore_into_stone_furnace2(game):
+def test_insert_copper_ore_into_furnace_containing_iron_ore(game):
     furnace = game.place_entity(
         Prototype.StoneFurnace, direction=Direction.UP, position=Position(x=0, y=0)
     )
-    try:
-        furnace = game.insert_item(Prototype.IronOre, furnace, quantity=500)
-        furnace = game.insert_item(Prototype.IronPlate, furnace, quantity=10)
-    except Exception as e:
-        assert True, f"Cannot insert incorrect item into a stone furnace: {e}"
+    furnace = game.insert_item(Prototype.IronOre, furnace, quantity=10)
 
+    assert furnace.furnace_source[Prototype.IronOre] == 10
 
-def test_insert_copper_ore_and_iron_ore_into_stone_furnace(game):
-    furnace = game.place_entity(
-        Prototype.StoneFurnace, direction=Direction.UP, position=Position(x=0, y=0)
-    )
-    try:
-        furnace = game.insert_item(Prototype.IronOre, furnace, quantity=10)
-        furnace = game.insert_item(Prototype.CopperOre, furnace, quantity=10)
-    except Exception as e:
-        assert True, (
-            f"Inserting both copper and iron ore into a stone furnace should raise an exception: {e}"
-        )
+    with pytest.raises(Exception):
+        game.insert_item(Prototype.CopperOre, furnace, quantity=10)
+
+    furnace = game.get_entity(Prototype.StoneFurnace, furnace.position)
+    assert furnace.furnace_source[Prototype.IronOre] == 10
 
 
 def test_insert_coal_into_burner_inserter(game):
@@ -82,13 +73,8 @@ def test_invalid_insert_ore_into_burner_inserter(game):
     inserter = game.place_entity(
         Prototype.BurnerInserter, direction=Direction.UP, position=Position(x=0, y=0)
     )
-    try:
-        inserter = game.insert_item(Prototype.IronOre, inserter, quantity=10)
-    except:
-        assert True, "Should not be able to add iron to an inserter"
-        return
-
-    assert False, "Should not be able to add iron to an inserter"
+    with pytest.raises(Exception):
+        game.insert_item(Prototype.IronOre, inserter, quantity=10)
 
 
 def test_insert_into_assembler(game):
@@ -302,5 +288,3 @@ def test_insert_into_two_furnaces(game):
         Prototype.CopperOre, furnace_copper, copper_ore_count
     )
     print(f"Inserted {copper_ore_count} Copper Ore into second Stone Furnace.")
-
-    assert True

@@ -33,23 +33,17 @@ def test_connect_pipes_underground_limited_inventory(game):
 
     belt_start_position = Position(x=0, y=-5.0)
     belt_end_position = Position(x=0.0, y=15.0)
-    try:
-        belts = game.connect_entities(
-            belt_start_position,
-            belt_end_position,
-            {Prototype.UndergroundPipe, Prototype.Pipe},
-        )
-        counter = 0
-        for belt in belts.belts:
-            if isinstance(belt, UndergroundBelt):
-                counter += 1
+    belts = game.connect_entities(
+        belt_start_position,
+        belt_end_position,
+        {Prototype.UndergroundPipe, Prototype.Pipe},
+    )
+    counter = 0
+    for belt in belts.belts:
+        if isinstance(belt, UndergroundBelt):
+            counter += 1
 
-        assert counter == 2
-        print(
-            f"Transport Belts laid from {belt_start_position} to {belt_end_position}."
-        )
-    except Exception as e:
-        print(f"Failed to lay Transport Belts: {e}")
+    assert counter == 2
 
 
 def test_connect_pipes_with_underground_pipes(game):

@@ -9,7 +9,6 @@ Invariants tested:
 2. Two entities cannot occupy the same collision space
 3. can_place_entity correctly predicts placement success/failure
 4. Entity placement respects collision box dimensions
-5. Underground belts of different types can overlap (braiding)
 """
 
 import pytest
@@ -140,6 +139,12 @@ def test_entity_respects_collision_box(game):
     )
     assert engine is not None
 
+    # The placed entity must report a collision-box-derived footprint
+    # matching the prototype's full tile area
+    assert engine.tile_dimensions.tile_width * engine.tile_dimensions.tile_height == (
+        Prototype.SteamEngine.WIDTH * Prototype.SteamEngine.HEIGHT
+    )
+
     # Try to place adjacent entity - should fail if it overlaps collision box
     # Steam engine is 3x5, so at direction UP, it extends in y direction
     # Check that we can't place something in the middle of its footprint
@@ -161,59 +166,6 @@ def test_entity_respects_collision_box(game):
             pytest.fail(
                 "Invariant violation: can_place_entity returned True but placement failed"
             )
-
-
-def test_underground_belts_can_braid(game):
-    """
-    Invariant: Underground belts of different types can overlap (braiding).
-
-    From Factorio 2.0 docs: Different types of underground belts can be braided together.
-    """
-    game.move_to(Position(x=0, y=0))
-
-    # Place regular underground belt pair
-    belt1_entrance = game.place_entity(
-        Prototype.UndergroundBelt,
-        position=Position(x=0, y=0),
-        direction=Direction.RIGHT,
-    )
-    assert belt1_entrance is not None
-
-    _belt1_exit = game.place_entity(
-        Prototype.UndergroundBelt,
-        position=Position(x=4, y=0),  # Within 4-tile range for basic underground
-        direction=Direction.RIGHT,
-    )
-
-    # Now try to place fast underground belt perpendicular (braiding)
-    # This should be allowed as they're different types
-    _can_braid = game.can_place_entity(
-        Prototype.FastUndergroundBelt,
-        position=Position(x=2, y=-2),
-        direction=Direction.DOWN,
-    )
-
-    # Place the fast underground belt entrance
-    fast_entrance = game.place_entity(
-        Prototype.FastUndergroundBelt,
-        position=Position(x=2, y=-2),
-        direction=Direction.DOWN,
-    )
-
-    # Place the fast underground belt exit (crossing the basic underground path)
-    fast_exit = game.place_entity(
-        Prototype.FastUndergroundBelt,
-        position=Position(x=2, y=2),  # Crosses y=0 where basic underground runs
-        direction=Direction.DOWN,
-    )
-
-    # Both should be successfully placed (braiding works)
-    if fast_entrance is not None and fast_exit is not None:
-        # Braiding successful
-        pass
-    # Note: Even if braiding doesn't work in this exact configuration,
-    # the invariant is that different types CAN braid, not that this specific
-    # configuration must work.
 
 
 def test_placement_near_player_allowed(game):

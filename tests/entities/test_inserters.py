@@ -106,42 +106,22 @@ def test_filter_inserter(game):
     )
 
 
-def test_stack_inserter(game):
+@pytest.mark.parametrize(
+    "filter_recipe",
+    [
+        pytest.param(None, id="bulk-inserter"),
+        pytest.param(RecipeName.ElectronicCircuit, id="bulk-inserter-with-filter"),
+    ],
+)
+def test_stack_inserter(game, filter_recipe):
     """Test bulk inserter's ability to move multiple items at once (Factorio 2.0: old stack-inserter renamed to bulk-inserter)"""
     input_chest, inserter, output_chest = setup_power_and_chests(
         game, Prototype.BulkInserter
     )
 
-    # Insert large quantity of items
-    game.insert_item(Prototype.ElectronicCircuit, input_chest, quantity=100)
-    # Check first transfer
-    first_transfer = game.inspect_inventory(output_chest).get(
-        Prototype.ElectronicCircuit, 0
-    )
-
-    # Wait for another transfer
-    game.sleep(5)
-
-    # Check second transfer
-    second_transfer = game.inspect_inventory(output_chest).get(
-        Prototype.ElectronicCircuit, 0
-    )
-
-    # Verify stack inserter moved more items per operation than regular inserters would
-    assert second_transfer > first_transfer, (
-        "Stack inserter failed to move multiple items at once"
-    )
-    assert second_transfer >= 10, "Stack inserter not moving expected quantity of items"
-
-
-def test_filter_stack_inserter(game):
-    """Test bulk inserter's ability to filter and move multiple items at once (Factorio 2.0: stack-filter-inserter renamed to bulk-inserter)"""
-    input_chest, inserter, output_chest = setup_power_and_chests(
-        game, Prototype.BulkInserter
-    )
-
-    # Set filter to only move electronic circuits
-    game.set_entity_recipe(inserter, RecipeName.ElectronicCircuit)
+    if filter_recipe is not None:
+        # Set filter to only move electronic circuits
+        game.set_entity_recipe(inserter, filter_recipe)
 
     # Insert large quantity of items
     game.insert_item(Prototype.ElectronicCircuit, input_chest, quantity=100)

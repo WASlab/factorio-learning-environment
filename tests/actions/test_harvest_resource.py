@@ -17,12 +17,13 @@ def test_harvest_resource_with_full_inventory(game):
     game.move_to(nearest_coal)
     try:
         # Harvest coal
-        game.harvest_resource(
-            nearest_coal, quantity=100
-        )  # Assuming there is a coal resource at (10, 10)
-        assert False, "Cannot harvest with a full inventory"
+        game.harvest_resource(nearest_coal, quantity=100)
     except Exception:
-        assert True
+        pass
+
+    # Harvesting with a full inventory should either raise or be capped
+    final_coal = game.inspect_inventory()[Resource.Coal]
+    assert final_coal <= 4000
 
 
 def test_harvest_resource(game):

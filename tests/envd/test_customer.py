@@ -234,7 +234,12 @@ def _sustained(quantity_total):
     )
 
 
-def test_steady_supply_beats_burst_for_sustained_orders():
+@pytest.mark.parametrize(
+    "burst_delivery",
+    [400, 150],
+    ids=["full_burst", "partial_burst"],
+)
+def test_single_slice_burst_scores_fractionally_for_sustained_orders(burst_delivery):
     total = 400
     steady_engine = ContractEngine(_spec([_sustained(total)]))
     for index in range(4):
@@ -250,7 +255,9 @@ def test_steady_supply_beats_burst_for_sustained_orders():
     steady = steady_engine.evaluate(SUSTAINED_WINDOW + 1)
 
     burst_engine = ContractEngine(_spec([_sustained(total)]))
-    burst_engine.sync(10, [DeliveryBucket(start_tick=0, items={"copper-cable": 400})])
+    burst_engine.sync(
+        10, [DeliveryBucket(start_tick=0, items={"copper-cable": burst_delivery})]
+    )
     burst = burst_engine.evaluate(SUSTAINED_WINDOW + 1)
 
     assert steady.order_results[0].ratio == pytest.approx(1.0)
@@ -260,14 +267,6 @@ def test_steady_supply_beats_burst_for_sustained_orders():
     assert burst_telemetry["raw_bucket_count"] == 1
     assert burst_telemetry["raw_bucket_coverage_ratio"] < 1.0
     assert burst_telemetry["sustained_service_score"] == pytest.approx(0.25)
-
-
-def test_partial_sustained_delivery_scores_fractionally():
-    engine = ContractEngine(_spec([_sustained(400)]))
-    engine.sync(10, [DeliveryBucket(start_tick=0, items={"copper-cable": 150})])
-    result = engine.evaluate(SUSTAINED_WINDOW + 1)
-    # First slice fully met (1.0), remaining three slices empty.
-    assert result.order_results[0].ratio == pytest.approx(0.25)
 
 
 def test_active_order_rejects_delivery_at_or_after_deadline():
@@ -501,8 +500,6 @@ def test_success_requires_all_required_orders_met():
 
 
 def test_receipt_signs_and_verifies():
-    import hashlib
-
     key = b"unit-test-key"
     spec = _spec([_one_shot("r1", quantity=10)], receipt_key_env="UNUSED")
     engine = ContractEngine(spec)
@@ -512,8 +509,6 @@ def test_receipt_signs_and_verifies():
     tampered = dict(result.receipt)
     tampered["aggregate_ratio"] = 0.42
     assert not verify_receipt(tampered, result.receipt_mac, key)
-    digest = hashlib.sha256(b"x").hexdigest()[:8]
-    assert len(result.receipt_mac) == 64 and digest != result.receipt_mac
 
 
 # ---------------------------------------------------------------------------

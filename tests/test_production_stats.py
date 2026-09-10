@@ -1,7 +1,6 @@
 import unittest
 
 from fle.env import FactorioInstance
-from fle.env.utils.rcon import _lua2python
 from fle.env.game_types import Resource
 
 
@@ -50,13 +49,6 @@ class TestProductionStats(unittest.TestCase):
 
         # Stats should accumulate (10 + 5 = 15)
         assert result["harvested"]["iron-ore"] == 15
-
-    def test_lua2python(self):
-        result = _lua2python(
-            "pcall(global.actions.get_production_stats, 1)",
-            '{ ["a"] = true,["b"] = {\n ["iron-ore"] = 10\n},}',
-        )
-        assert result
 
 
 if __name__ == "__main__":

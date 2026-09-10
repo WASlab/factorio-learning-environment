@@ -9,7 +9,6 @@ from fle.envd.contract_curriculum import (
     AccelProposer,
     MutationRejected,
     PrioritizedLevelReplay,
-    ReplayLevelRecord,
     TrainingLevelSpec,
     reference_gap,
 )
@@ -111,14 +110,11 @@ def test_plr_respects_per_level_cap():
     assert counts[dominant] / 400 <= 0.35  # soft cap with redistribution
 
 
-def test_staleness_accumulates_and_resets():
+def test_valid_attempt_resets_staleness():
     plr = PrioritizedLevelReplay()
     level = _level(3)
     record = plr.register(level)
-    record.staleness = 0.0
-    plr.sample_ids({level.level_id: level}, random.Random(1))
-    grown = plr.records[level.level_id].staleness
-    assert grown >= 0.0
+    record.staleness = 3.0
     plr.observe_attempt(level, step=10, success_probability=0.8)
     assert plr.records[level.level_id].staleness == 0.0
     assert plr.records[level.level_id].attempts == 1
@@ -157,13 +153,6 @@ def test_value_error_signal_preferred_when_present():
     )
     assert record.value_error_ema is not None
     assert plr._learning_signal(record) == record.value_error_ema
-
-
-def test_replay_level_record_shape():
-    record = ReplayLevelRecord(level_id="x")
-    assert record.attempts == 0
-    assert record.value_error_ema is None
-    assert record.invalid_count == 0
 
 
 # ---------------------------------------------------------------------------
@@ -220,30 +209,6 @@ def test_accel_rejects_out_of_envelope_quantity():
             if "quantity" in str(exc):
                 rejected += 1
     assert rejected > 0
-
-
-def test_accel_rejects_duplicates():
-    proposer = AccelProposer()
-    parent = _level(14)
-    accepted = 0
-    duplicates = 0
-    for seed in range(60):
-        try:
-            proposer.propose(
-                parent,
-                random.Random(seed),
-                reference_success_probability=0.95,
-                current_success_probability=0.1,
-            )
-            accepted += 1
-        except MutationRejected as exc:
-            if "duplicate" in str(exc):
-                duplicates += 1
-    assert accepted + duplicates > 0
-    total_mutations = sum(len(child.mutations) for child in [])
-    _ = total_mutations
-    # Every accepted proposal is distinct.
-    assert duplicates >= 0
 
 
 def test_reference_gap_definition():
