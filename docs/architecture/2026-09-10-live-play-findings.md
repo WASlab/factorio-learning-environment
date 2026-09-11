@@ -142,26 +142,36 @@ be created that the character could not afford. Verified live:
 `queue_craft(WoodenChest, 2)` returned `crafted: 2` and the chests were in the
 inventory in the same program.
 
-### 7. Placement diagnostics can mislead (open)
+### 7. Placement diagnostics can mislead (FIXED)
 
-Two live instances while building the first real smelter line:
+Live examples: a drill placement at `(0,-2)` was rejected as `occupied` naming
+the crash-site spaceship; a drill at `(3,-70)` was rejected as
+`engine_rules_or_route_obstruction` with a clear footprint (there was simply **no
+ore** under it — mining drills cannot be placed without resources).
 
-- A drill placement at `(0,-2)` was rejected with `reason: "occupied"` and
-  `overlapping_entities` naming the crash-site spaceship four tiles away.
-- A drill placement at `(3,-70)`, adjacent to a working furnace, was rejected
-  with `reason: "engine_rules_or_route_obstruction"` with an empty collision
-  list and the footprint clear; the same drill placed cleanly at `(3,-64)`.
+Fix (`2e021cb9`): `spatial_diagnostics` now receives the entity prototype,
+counts resources in the mining area, and reports
+`reason: "no_minable_resources"` with `mining_area` and `mining_resources` when
+a mining drill has nothing to mine. Overlapping entities are ordered by
+distance and carry a `distance` field. Verified live: placing a drill on grass
+returns the dedicated reason instead of a generic engine rejection.
 
-Both rejections were real enough to require moving, but the evidence did not
-identify the blocker. Tightening the collision-context selection (and
-explaining engine-rule rejections) would remove guesswork.
+### 8. `wait()` units are ticks (FIXED)
 
-### 8. `wait()` units are ticks
+`wait(75)` advanced 75 ticks (~1.25 s), not 75 seconds. The result now includes
+`requested_seconds` and `elapsed_seconds` alongside the tick fields, and the
+action reference states "60 ticks = 1 game second". Verified live.
 
-During the first smelt, `wait(75)` advanced 75 ticks (~1.25 s), not 75 seconds,
-so the furnace barely produced. The action reference documents ticks; a
-units cue in the receipt (e.g., `ticks_elapsed`) already helps, but this is the
-kind of unit an agent can trip on when pacing production.
+### 9. Mining drill sink warning was spurious (FIXED)
+
+`has_output_space` did not treat a furnace as a sink and trusted a transient
+`waiting_for_space_in_destination` status, so a drill happily feeding an
+adjacent furnace reported `'furnace at drop position is blocked.'`
+
+Fix (`2e021cb9`): furnaces, assembling machines, and logistic containers are
+recognized sinks with input-space checks; drills evaluate the sink itself
+instead of the flapping status. Verified live: the new iron pair shows no
+drill warnings while the furnace produces plates.
 
 ## Primitive feedback (training/eval relevance)
 
