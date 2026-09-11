@@ -142,14 +142,26 @@ be created that the character could not afford. Verified live:
 `queue_craft(WoodenChest, 2)` returned `crafted: 2` and the chests were in the
 inventory in the same program.
 
-### 7. Placement diagnostics can name a non-overlapping entity (open)
+### 7. Placement diagnostics can mislead (open)
 
-A drill placement at `(0,-2)` was rejected with `reason: "occupied"` and
-`overlapping_entities` listing the crash-site spaceship at `(-5,-6)` — several
-tiles away and not inside the reported footprint. The placement was genuinely
-rejected (moving away solved it), but the evidence pointed at the wrong entity.
-Worth tightening the collision-context selection to only entities whose
-collision boxes intersect the footprint.
+Two live instances while building the first real smelter line:
+
+- A drill placement at `(0,-2)` was rejected with `reason: "occupied"` and
+  `overlapping_entities` naming the crash-site spaceship four tiles away.
+- A drill placement at `(3,-70)`, adjacent to a working furnace, was rejected
+  with `reason: "engine_rules_or_route_obstruction"` with an empty collision
+  list and the footprint clear; the same drill placed cleanly at `(3,-64)`.
+
+Both rejections were real enough to require moving, but the evidence did not
+identify the blocker. Tightening the collision-context selection (and
+explaining engine-rule rejections) would remove guesswork.
+
+### 8. `wait()` units are ticks
+
+During the first smelt, `wait(75)` advanced 75 ticks (~1.25 s), not 75 seconds,
+so the furnace barely produced. The action reference documents ticks; a
+units cue in the receipt (e.g., `ticks_elapsed`) already helps, but this is the
+kind of unit an agent can trip on when pacing production.
 
 ## Primitive feedback (training/eval relevance)
 
