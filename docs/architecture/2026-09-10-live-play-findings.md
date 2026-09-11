@@ -112,37 +112,44 @@ features too") but never sends it.
   ("Could not find a valid stone-furnace entity containing iron-plate") rather
   than a typed empty-output result.
 
-### 5. Burner drill cannot feed an adjacent stone furnace (open; chest workaround)
+### 5. Burner drill cannot feed an adjacent stone furnace (FIXED)
 
-The canonical early-game layout (burner mining drill facing a directly adjacent
-stone furnace) does not transfer items on this build. This supersedes the
-earlier "ground-item trap" guess: the warning was the same in both sessions and
-the cause is geometric.
+The classic early-game layout failed on this build: the drill's drop point
+(`vector_to_place_result = {0, -1.296875}` converted to a 1.296875-tile forward
+offset) lands 0.0039 tiles outside a 2x2 machine's collision box
+(`0.69921875`), so the engine reports `output blocked by item on the ground.
+There is no sink entity in place to accept the output.` while the furnace is
+visibly adjacent. FLE's rounding of `drop_position` and the `neighbours` list
+hid the cause.
 
-- Engine truth (RCON): drill at `(-18,-49)` facing east has
-  `drop_position = (-16.703125, -49.5)`; the furnace at `(-16,-49)` has
-  `bounding_box = (-16.69921875, -49.69921875)..(-15.30078125, -48.30078125)`.
-  The drop point misses the collision box by `0.00390625` tiles, so the engine
-  reports `output blocked by item on the ground. There is no sink entity in
-  place to accept the output.` while the furnace is visibly adjacent.
-- FLE's own serialization rounds the drop to `(-16.5, -49.5)` and lists the
-  furnace under `neighbours`, so structured diagnostics look healthy and hide
-  the cause.
-- Workaround that works: a **wooden chest at the drop tile**
-  (`place_entity(Prototype.WoodenChest, position=Position(-16.5, -49.5))`) is
-  accepted as the sink; the warning clears and ore accumulates in the chest.
-  `extract_item` from the chest works; ore can then be hand-fed to a furnace.
-- Implication: direct drill -> furnace automation needs a chest/inserter hop,
-  or a corrected sink placement offset. Worth testing whether a half-tile
-  furnace offset or a different sink entity restores direct feed.
+Fix (committed `080c7e83`, corrected to the north-facing vector in `e57d8ad8`):
+`fle/cluster/runtime_scenario.py` now emits a `data-updates.lua` in the runtime
+mod that sets `vector_to_place_result = {0, -1.5}` for the burner mining drill,
+so the drop lands on the tile center in front. Verified live: drill at
+`(10,-6)` facing east feeds a furnace at `(12,-6)`; the status journal shows
+`no_fuel -> no_ingredients -> working` (iron-plate) and a plate was extracted.
+Workaround no longer needed: chests at the drop tile still work but are no
+longer required.
 
-### 6. Crafting is asynchronous and placement needs the finished item
+### 6. Crafting was asynchronous and required a wait (FIXED)
 
-`queue_craft(Prototype.WoodenChest, quantity=1)` returns a structured craft
-handle (`handle`, `queued`, `queued_crafts`, `partial`, `tick`) but the item is
-not in inventory until the craft completes; an immediate `place_entity` fails
-with "No wooden_chest in inventory". `get_craft_queue()` shows the active
-queue, and the same placement succeeds after a short `wait`.
+`queue_craft` used `begin_native_crafting`, so the item only appeared after
+later game ticks. Fix (committed `30ca1ddb`): `queue_craft` completes the craft
+within the intervention by running the audited instant-craft path used by
+`craft_item` (forced only for that call, restored immediately). Only existing
+ingredients are consumed and the crafting time is still booked, so no item can
+be created that the character could not afford. Verified live:
+`queue_craft(WoodenChest, 2)` returned `crafted: 2` and the chests were in the
+inventory in the same program.
+
+### 7. Placement diagnostics can name a non-overlapping entity (open)
+
+A drill placement at `(0,-2)` was rejected with `reason: "occupied"` and
+`overlapping_entities` listing the crash-site spaceship at `(-5,-6)` — several
+tiles away and not inside the reported footprint. The placement was genuinely
+rejected (moving away solved it), but the evidence pointed at the wrong entity.
+Worth tightening the collision-context selection to only entities whose
+collision boxes intersect the footprint.
 
 ## Primitive feedback (training/eval relevance)
 
