@@ -43,7 +43,7 @@ def test_runtime_mod_aligns_burner_drill_drop_point(tmp_path):
         )
         source = bundle.read(entry).decode("utf-8")
     assert 'data.raw["mining-drill"]["burner-mining-drill"]' in source
-    assert "vector_to_place_result = {1.5, 0}" in source
+    assert "vector_to_place_result = {0, -1.5}" in source
 
 
 def test_cluster_mounts_generated_runtime_mod_directory(tmp_path):
