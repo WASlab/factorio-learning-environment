@@ -24,7 +24,13 @@ from fle.envd.models import (
     ContractEpochSpec,
     FactorioTaskSpec,
 )
+from fle.envd.program_policy import ProgramPolicyViolation
 from fle.envd.service import EnvironmentService
+from fle.envd.templates import (
+    TemplateError,
+    TemplateInvalid,
+    TemplateNotFound,
+)
 
 
 class RequestModel(BaseModel):
@@ -71,6 +77,24 @@ class ContractEpochFinalizeRequest(RequestModel):
 
 
 class ThroughputCheckRequest(RequestModel):
+    request_id: str | None = Field(default=None, min_length=1, max_length=128)
+
+
+class RealtimeRequest(RequestModel):
+    """Pacing toggle: run the simulation between interventions, never < 1x."""
+
+    enabled: bool
+    speed: float | None = Field(default=None, ge=1.0, le=10.0)
+
+
+class TemplateSaveRequest(RequestModel):
+    code: str = Field(min_length=1)
+    description: str = ""
+    parameters: list[dict[str, Any]] = Field(default_factory=list)
+
+
+class TemplateRunRequest(RequestModel):
+    arguments: dict[str, Any] = Field(default_factory=dict)
     request_id: str | None = Field(default=None, min_length=1, max_length=128)
 
 
@@ -271,6 +295,61 @@ def create_app(service: EnvironmentService) -> FastAPI:
         return service.check_contract_throughput(
             lease_id, request_id=request.request_id
         ).model_dump(mode="json")
+
+    # -- pacing toggle and program templates --------------------------------
+
+    @app.post("/v1/leases/{lease_id}/realtime")
+    def set_realtime(lease_id: str, request: RealtimeRequest):
+        try:
+            return service.set_realtime(
+                lease_id, enabled=request.enabled, speed=request.speed
+            )
+        except ValueError as exc:
+            raise HTTPException(status_code=422, detail=str(exc)) from exc
+
+    @app.get("/v1/leases/{lease_id}/templates")
+    def list_templates(lease_id: str):
+        return service.list_templates(lease_id)
+
+    @app.get("/v1/leases/{lease_id}/templates/{name}")
+    def get_template(lease_id: str, name: str):
+        try:
+            return service.get_template(lease_id, name)
+        except TemplateNotFound as exc:
+            raise HTTPException(status_code=404, detail=str(exc)) from exc
+        except TemplateInvalid as exc:
+            raise HTTPException(status_code=422, detail=str(exc)) from exc
+
+    @app.put("/v1/leases/{lease_id}/templates/{name}")
+    def save_template(lease_id: str, name: str, request: TemplateSaveRequest):
+        try:
+            return service.save_template(
+                lease_id,
+                name,
+                code=request.code,
+                description=request.description,
+                parameters=request.parameters,
+            )
+        except (TemplateError, ProgramPolicyViolation) as exc:
+            raise HTTPException(status_code=422, detail=str(exc)) from exc
+
+    @app.delete("/v1/leases/{lease_id}/templates/{name}")
+    def delete_template(lease_id: str, name: str):
+        return service.delete_template(lease_id, name)
+
+    @app.post("/v1/leases/{lease_id}/templates/{name}/run")
+    def run_template(lease_id: str, name: str, request: TemplateRunRequest):
+        try:
+            return service.run_template(
+                lease_id,
+                name,
+                arguments=request.arguments,
+                request_id=request.request_id,
+            ).model_dump(mode="json")
+        except TemplateNotFound as exc:
+            raise HTTPException(status_code=404, detail=str(exc)) from exc
+        except TemplateInvalid as exc:
+            raise HTTPException(status_code=422, detail=str(exc)) from exc
 
     # -- model-managed memory; lease-scoped and never a host filesystem API --
 

@@ -325,6 +325,9 @@ class Technology(enum.Enum):
     Automation2 = "automation-2"  # Unlocks assembling machine 2
     Automation3 = "automation-3"  # Unlocks assembling machine 3
 
+    # Mining technologies
+    ElectricMiningDrill = "electric-mining-drill"  # Unlocks electric mining drill
+
     # Logistics technologies
     Logistics = "logistics"  # Unlocks basic belts and inserters
     Logistics2 = "logistics-2"  # Unlocks fast belts and inserters

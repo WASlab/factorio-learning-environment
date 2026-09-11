@@ -128,7 +128,11 @@ Recommended namespaces are:
 - `factory/assets`: important entity groups, coordinates, and capacities;
 - `factory/capabilities`: what is working versus merely attempted;
 - `lessons`: errors, corrected API usage, and failed approaches;
-- `library`: model-written reusable programs and construction patterns;
+- `library`: model-written reusable programs and construction patterns.
+  Reusable *programs* are first-class now via the program template library
+  (`factorio_save_program_template` / `factorio_run_program_template`, see
+  `docs/architecture/tool-calling-compatibility.md`); construction patterns use
+  the blueprint library. Memory remains the place for prose notes and lessons;
 - `orders/<epoch>`: concise outcome and unfinished work for an order.
 
 Memory content is untrusted model output. It cannot alter contracts, ratings,

@@ -155,17 +155,23 @@ local function place(player_index, bp_string, x, y)
     end
 
     local costs = {}
+    local ghost_costs = {}
     for _, ghost in pairs(buildable) do
+        local cost = {}
         local item_name = ghost.ghost_name
         -- Factorio 2.0 moved item prototypes to the global prototypes table.
         if item_name and prototypes.item[item_name] then
-            costs[item_name] = (costs[item_name] or 0) + 1
+            cost[item_name] = (cost[item_name] or 0) + 1
         end
         local requests = ghost.item_requests
         if requests then
             for item, count in pairs(requests) do
-                costs[item] = (costs[item] or 0) + tonumber(count) or count
+                cost[item] = (cost[item] or 0) + (tonumber(count) or count)
             end
+        end
+        ghost_costs[ghost] = cost
+        for item, count in pairs(cost) do
+            costs[item] = (costs[item] or 0) + count
         end
     end
 
@@ -195,8 +201,24 @@ local function place(player_index, bp_string, x, y)
 
     -- Revive ghosts immediately except rolling stock, which must wait until
     -- rails exist. Mirrors the admin loader minus privileged side effects.
+    -- A ghost that cannot revive (for example a collision) is refunded and
+    -- cleared so partial placements never silently burn materials.
     local deferred = {}
     local placed = 0
+    local refunded = {}
+    local function attempt_revive(ghost)
+        local p, ri = ghost.revive()
+        if p ~= nil or ri ~= nil then
+            placed = placed + 1
+            return
+        end
+        for item, count in pairs(ghost_costs[ghost] or {}) do
+            refunded[item] = (refunded[item] or 0) + count
+        end
+        if ghost.valid then
+            ghost.destroy()
+        end
+    end
     for _, ghost in ipairs(buildable) do
         if (
             ghost.ghost_name == "locomotive"
@@ -205,17 +227,14 @@ local function place(player_index, bp_string, x, y)
         ) then
             table.insert(deferred, ghost)
         else
-            local p, ri = ghost.revive()
-            if p ~= nil or ri ~= nil then
-                placed = placed + 1
-            end
+            attempt_revive(ghost)
         end
     end
     for _, ghost in pairs(deferred) do
-        local p, ri = ghost.revive()
-        if p ~= nil or ri ~= nil then
-            placed = placed + 1
-        end
+        attempt_revive(ghost)
+    end
+    for item, count in pairs(refunded) do
+        inventory.insert({name = item, count = count})
     end
 
     storage.elapsed_ticks = (storage.elapsed_ticks or 0)
@@ -225,6 +244,7 @@ local function place(player_index, bp_string, x, y)
         placed = placed,
         requested = #bp_ghost,
         items_consumed = costs,
+        refunded = refunded,
         construction_ticks_charged = placed * CONSTRUCTION_TICKS_PER_ENTITY,
         tiles_skipped = tiles_skipped,
     }

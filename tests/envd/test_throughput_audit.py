@@ -170,8 +170,14 @@ class _CandidateWorker(FakeWorker):
         self.recorded: list[ThroughputAuditResult] = []
         self.accepted: list[ThroughputAuditResult] = []
 
-    def execute(self, lease_id: str, code: str, sequence: int) -> ExecutionResult:
-        result = super().execute(lease_id, code, sequence)
+    def execute(
+        self,
+        lease_id: str,
+        code: str,
+        sequence: int,
+        template: str | None = None,
+    ) -> ExecutionResult:
+        result = super().execute(lease_id, code, sequence, template=template)
         self._candidate = SimpleNamespace(candidate_tick=sequence * 60)
         return result
 

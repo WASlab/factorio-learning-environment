@@ -15,6 +15,14 @@ storage.actions.set_research = function(player_index, technology_name)
         error(string.format("\"Technology %s is not enabled\"", technology_name))
     end
 
+    local trigger = tech.prototype.research_trigger
+    if trigger then
+        local what = trigger.entity or trigger.item or trigger.fluid or trigger.type
+        error(string.format(
+            "\"Technology %s is trigger-gated (%s: %s); complete the trigger in-game to unlock it\"",
+            technology_name, trigger.type, what))
+    end
+
     -- Cancel current research if any
     force.cancel_current_research()
 

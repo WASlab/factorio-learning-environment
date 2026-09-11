@@ -63,11 +63,35 @@ explicit.
 ## Canonical semantic motor runtime
 
 `semantic-motor-v1` is the canonical action profile. Reasoning remains
-turn-based: the world pauses while the model thinks and advances on native
-Factorio ticks while semantic options execute. `execution_game_speed` changes
-only the ratio of simulation time to observer wall time, so an observer may run
-at 1x or faster without changing action semantics, receipts, deadlines, or
-scores.
+turn-based by default: the world pauses while the model thinks and advances on
+native Factorio ticks while semantic options execute. `execution_game_speed`
+changes only the ratio of simulation time to observer wall time, so an observer
+may run at 1x or faster without changing action semantics, receipts, deadlines,
+or scores.
+
+Agents may explicitly opt out of paused-while-thinking with
+`factorio_set_realtime(enabled, speed)` (envd `POST /v1/leases/{id}/realtime`).
+When enabled, the world stays unpaused between interventions at the requested
+speed, clamped to 1x-10x; disabling pauses immediately. Pacing is never a
+determinism input: receipts, scores, and deadlines still use authoritative
+ticks, and the active mode is reported in every observation under `realtime`.
+Audit workers and lease release/finalize always return to the paused default.
+Evaluation configurations decide whether realtime mode is permitted, because
+"paused while thinking" versus "running while thinking" are different tasks.
+
+Reusable agent-authored programs are first-class through the program template
+library (`factorio_save_program_template`, `factorio_run_program_template`,
+`factorio_list_program_templates`, `factorio_get_program_template`,
+`factorio_delete_program_template`). A template is a normal sandbox program
+body with declared `{{parameter}}` placeholders and defaults. Saving expands
+the body with its defaults and runs the canonical `validate_program` policy, so
+templates cannot smuggle in new powers, planner assistance, or imports.
+Execution expands the stored body with the supplied JSON arguments, validates
+it again, and hashes the expanded source, so receipts, idempotency, and
+telemetry behave exactly as for a hand-written program; the action event records
+the template name next to the expanded-code hash. Scope mirrors blueprints:
+lease-ephemeral by default, durable per training generation when the task sets
+`template_scope`.
 
 The controller owns character-scale execution: collision-aware walking,
 auto-approach for interactions, native mining and crafting duration, and exact

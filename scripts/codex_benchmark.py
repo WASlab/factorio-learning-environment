@@ -142,7 +142,9 @@ async def run_attempt(
                 "`factorio__factorio_execute_program`; available in-factory "
                 "names include inspect_inventory, get_entities, nearest, "
                 "move_to, harvest_resource, craft_item, place_entity, "
-                "insert_item, extract_item, set_entity_recipe. Prefer the "
+                "insert_item, extract_item, set_entity_recipe, and "
+                "blueprint('save'|'place'|'list'|'get') for reusable factory "
+                "fragments. Prefer the "
                 "supplied inventory over gathering. When the objective is "
                 "met, or no useful action remains, stop calling tools."
             )

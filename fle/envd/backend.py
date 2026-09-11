@@ -20,6 +20,7 @@ from fle.env import FactorioInstance
 from fle.env.entities import Position
 from fle.env.utils.achievements import calculate_achievements
 from fle.envd.blueprints import BlueprintStore
+from fle.envd.templates import ProgramTemplateStore, expand_template
 from fle.envd.contract_features import (
     NamespaceRecipeDataSource,
     ProductCatalog,
@@ -64,6 +65,9 @@ from fle.envd.models import (
     Observation,
     OpenContractView,
     PrivilegedTransitionPacket,
+    ProgramTemplateSummary,
+    ProgramTemplateView,
+    RealtimeState,
     RewardVector,
     StateQualitySnapshot,
     ThroughputAuditResult,
@@ -307,7 +311,13 @@ class FactorioWorker(ABC):
         """Reset and provision the task, returning its initial state hash."""
 
     @abstractmethod
-    def execute(self, lease_id: str, code: str, sequence: int) -> ExecutionResult:
+    def execute(
+        self,
+        lease_id: str,
+        code: str,
+        sequence: int,
+        template: str | None = None,
+    ) -> ExecutionResult:
         pass
 
     @abstractmethod
@@ -399,6 +409,13 @@ class FLEWorker(FactorioWorker):
         self._execution_game_speed = float(
             getattr(instance, "get_speed", lambda: 10.0)()
         )
+        # Pacing: when realtime is enabled the world stays unpaused between
+        # interventions at the execution speed.  Simulation accounting always
+        # uses authoritative ticks, so this never changes scores or deadlines.
+        self._realtime_enabled = False
+        # Program templates are ephemeral to the worker unless the task
+        # provisions a lineage-scoped store in start_task().
+        self.template_store = ProgramTemplateStore(scope=None)
         self.task = None
         self.task_spec: FactorioTaskSpec | None = None
         self.initial_telemetry: TelemetryFrame | None = None
@@ -689,6 +706,9 @@ class FLEWorker(FactorioWorker):
             # state hash and telemetry include the damage.
             self._fire_due_shocks(0)
         self._attach_blueprint_store(task)
+        self._attach_template_store(task)
+        self._realtime_enabled = False
+        self._realtime_allowed = bool(getattr(task, "realtime_allowed", True))
         self.instance.set_speed(getattr(self, "_execution_game_speed", 10.0))
         self.instance.pause()
         self.task = fle_task
@@ -1612,10 +1632,10 @@ class FLEWorker(FactorioWorker):
         return self._fire_due_shocks(self._episode_tick(), stats=stats)
 
     def _attach_blueprint_store(self, task: FactorioTaskSpec) -> None:
-        """Provision the generation-scoped blueprint library (or ephemeral)."""
+        """Provision the map-lineage blueprint library (or ephemeral)."""
 
         namespace = self.instance.first_namespace
-        scope = task.blueprint_scope
+        scope = task.blueprint_scope or task.lineage_id
         store = None
         if scope:
             try:
@@ -1636,6 +1656,90 @@ class FLEWorker(FactorioWorker):
         except Exception:
             return []
         return [BlueprintSummary(**summary) for summary in summaries]
+
+    def _attach_template_store(self, task: FactorioTaskSpec) -> None:
+        """Provision the map-lineage program template library."""
+
+        scope = task.template_scope or task.lineage_id
+        if not scope:
+            self.template_store = ProgramTemplateStore(scope=None)
+            return
+        try:
+            self.template_store = ProgramTemplateStore(scope=scope)
+        except Exception:
+            self.template_store = ProgramTemplateStore(scope=None)
+
+    def _template_summaries(self) -> list[ProgramTemplateSummary]:
+        try:
+            summaries = self.template_store.list_summaries()
+        except Exception:
+            return []
+        return [ProgramTemplateSummary(**summary) for summary in summaries]
+
+    def realtime_state(self) -> RealtimeState:
+        """Current pacing mode visible to the agent."""
+
+        try:
+            control = getattr(self.instance, "game_control", None)
+            paused = bool(control.is_paused())
+        except Exception:
+            paused = not bool(getattr(self, "_realtime_enabled", False))
+        return RealtimeState(
+            enabled=bool(getattr(self, "_realtime_enabled", False)),
+            speed=float(getattr(self, "_execution_game_speed", 10.0)),
+            paused=paused,
+        )
+
+    def set_realtime(
+        self,
+        lease_id: str,
+        *,
+        enabled: bool,
+        speed: float | None = None,
+    ) -> dict[str, Any]:
+        """Toggle whether the simulation runs between agent interventions.
+
+        ``enabled=True`` leaves the world running at ``speed`` (1x-10x) while
+        the model reasons; ``enabled=False`` restores the default turn-based
+        behaviour and pauses immediately.  The speed floor is 1x: the toggle
+        can never slow the simulation below normal realtime.
+        """
+
+        del lease_id
+        if enabled and not getattr(self, "_realtime_allowed", True):
+            raise ValueError(
+                "Realtime mode is disabled for this task; the world stays "
+                "paused between interventions"
+            )
+        if speed is not None:
+            speed_value = float(speed)
+            if not 1.0 <= speed_value <= 10.0:
+                raise ValueError("Realtime speed must be between 1x and 10x")
+            self._execution_game_speed = speed_value
+        self._realtime_enabled = bool(enabled)
+        if self._realtime_enabled:
+            self.instance.set_speed_and_unpause(self._execution_game_speed)
+        else:
+            self.instance.pause()
+        return self.realtime_state().model_dump(mode="json")
+
+    def run_template(
+        self,
+        lease_id: str,
+        name: str,
+        arguments: dict[str, Any] | None = None,
+    ) -> tuple[str, int | None]:
+        """Expand a stored template to source code and record the use."""
+
+        del lease_id
+        record = self.template_store.get(name)
+        expanded = expand_template(record.code, record.parameters, arguments)
+        try:
+            tick = int(self._episode_tick())
+        except Exception:
+            tick = None
+        self.template_store.record_run(name, tick)
+        return expanded, tick
 
     def export_game_state(self) -> str | None:
         """Serialize the live world for lifecycle checkpointing.
@@ -2205,7 +2309,13 @@ class FLEWorker(FactorioWorker):
                 self._episode_tick() + detector_seconds * 60
             )
 
-    def execute(self, lease_id: str, code: str, sequence: int) -> ExecutionResult:
+    def execute(
+        self,
+        lease_id: str,
+        code: str,
+        sequence: int,
+        template: str | None = None,
+    ) -> ExecutionResult:
         action_started_tick = self._episode_tick()
         before, automated_before = self._scores()
         delivered_before = self._delivery_totals()
@@ -2225,8 +2335,12 @@ class FLEWorker(FactorioWorker):
             _, duration, result = self.instance.eval(code, timeout=120)
         finally:
             self._capture_tool_calls = False
-            # Model generation and network latency must not advance simulation time.
-            self.instance.pause()
+            # Model generation and network latency must not advance simulation
+            # time.  Realtime mode is the explicit opt-out: the world keeps
+            # running between interventions at the execution speed until the
+            # agent disables it (or the lease is finalized/released).
+            if not getattr(self, "_realtime_enabled", False):
+                self.instance.pause()
         action_ended_tick = self._episode_tick()
         self._executing_lease_id = None
         result_text = str(result)
@@ -2326,6 +2440,7 @@ class FLEWorker(FactorioWorker):
             ticks_elapsed=max(action_ended_tick - action_started_tick, 0),
             executed_tools=executed_tools,
             policy_violations=policy_violations,
+            template=template,
         )
         self._action_events.append(event)
         if (
@@ -3084,6 +3199,8 @@ class FLEWorker(FactorioWorker):
             blueprints=[
                 BlueprintSummary.model_validate(item) for item in state["blueprints"]
             ],
+            templates=self._template_summaries(),
+            realtime=self.realtime_state(),
         )
 
     def craft_plan(
@@ -4060,6 +4177,7 @@ class FLEWorker(FactorioWorker):
                 self._active_epoch_spec = None
                 self._active_factory_band = None
                 self._active_target_band = None
+        self._realtime_enabled = False
         self.instance.pause()
         self.customer_engine = None
         self._customer_events = []

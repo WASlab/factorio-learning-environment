@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import hashlib
 
-ACTION_PROFILE_REFERENCE_ID = "semantic-motor-v1/reference-v1"
+ACTION_PROFILE_REFERENCE_ID = "semantic-motor-v1/reference-v2"
 
 ACTION_PROFILE_REFERENCE = """\
 Operate and expand a persistent factory, emphasizing autonomous production,
@@ -110,6 +110,25 @@ Native asynchronous work and event-oriented waits:
 - queue_research([Technology.X, Technology.Y]) appends enabled technologies to
     Factorio's native queue; set_research(Technology.X) replaces the queue
 - get_research_progress(Technology.X)
+
+Blueprint library (reusable factory fragments):
+- blueprint('save', name, x, y, radius=32) captures force-owned entities in
+    the radius and stores the exchange string under name
+- blueprint('place', name_or_string, x, y) places a saved design by name or an
+    inline exchange string; materials are billed against your inventory
+- blueprint('list') -> {'blueprints': [{'name', 'entity_count', 'times_placed'}]}
+- blueprint('get', name) -> {'name', 'content'}  # full exchange string
+Prefer placing saved blueprints by name over re-emitting exchange strings.
+Safer to build small, complete fragments (drill + furnace + inserters) than
+whole bases: placement bills every entity; ghosts that fail to revive are
+refunded and cleared, but a large failed placement wastes planning effort.
+
+Program library and pacing (harness tools, not in-program calls):
+- factorio_save_program_template / factorio_run_program_template store and
+  replay canonical programs with {{parameter}} substitution; templates are
+  expanded and validated by this same policy before they run.
+- factorio_set_realtime(enabled, speed) opts into a running world between
+  interventions (1x-10x, never below 1x); the default is paused-while-thinking.
 
 Customer output:
 - set_delivery_chest(chest, product) binds an existing empty player-owned chest;

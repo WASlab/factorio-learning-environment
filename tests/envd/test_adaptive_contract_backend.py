@@ -79,7 +79,13 @@ class ContractFakeWorker(FactorioWorker):
         self._session_baseline_tick = self.tick
         return "initial-hash"
 
-    def execute(self, lease_id: str, code: str, sequence: int) -> ExecutionResult:
+    def execute(
+        self,
+        lease_id: str,
+        code: str,
+        sequence: int,
+        template: str | None = None,
+    ) -> ExecutionResult:
         self._interventions += 1
         event = ActionEvent(
             sequence=sequence,

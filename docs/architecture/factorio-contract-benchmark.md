@@ -138,19 +138,25 @@ Blueprints are learned artifacts with explicit ownership semantics:
 
 Agents get four commands (`fle/env/tools/agent/blueprint`): `save`
 (bounded-area capture, characters excluded), `place` (by library name or
-inline exchange string), `list`, `get`. Content stays server-side; the
-observation carries summaries only (`Observation.blueprints`), which pushes
+inline exchange string), `list`, `get`. The command form
+`blueprint('save', ...)` and the method form `blueprint.save(...)` are both
+supported; both route through the tool hook wrapper. Content stays server-side;
+the observation carries summaries only (`Observation.blueprints`), which pushes
 the policy toward referencing structural patterns instead of re-emitting
-strings.
+strings. Agent-facing discovery lives in the canonical action reference and
+`fle/env/tools/agent/blueprint/agent.md`, which feed
+`factorio_search_reference`/`factorio_read_reference`.
 
 Placement economics close the infinite-infrastructure exploit:
 
 1. the full material bill is aggregated from ghost types plus module/fuel
    requests *before* anything is placed;
-2. placement is all-or-nothing -- missing materials return
-   `missing_materials` with deficits and leave the world untouched;
+2. the missing-materials pre-check is atomic: insufficient inventory returns
+   `missing_materials` with deficits and leaves the world untouched;
 3. success debits the items from character inventory and charges
-   construction time (15 ticks/entity) against the task clock.
+   construction time (15 ticks/entity) against the task clock. Ghosts that
+   fail to revive (e.g. collisions) are refunded and cleared, so the net debit
+   matches the entities that actually appeared.
 
 Unlike the admin loader, agent placement does not call
 `research_all_technologies()`; one blueprint must not unlock the tech tree.

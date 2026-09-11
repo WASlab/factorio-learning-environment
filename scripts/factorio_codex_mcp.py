@@ -925,6 +925,7 @@ TOOLS = [
             "place_entity_next_to, insert_item, extract_item, set_entity_recipe, "
             "transfer_item, place_between, place_power_line, resolve_entity, "
             "get_entity_ports, place_offshore_pump, get_resource_patch, "
+            "blueprint('save'|'place'|'list'|'get'), "
             "set_research, sleep, print. Planner-assisted connect_entities and "
             "nearest_buildable are intentionally absent from the canonical profile. "
             "When insert_item is used, the result includes a delivery_receipt "
@@ -1355,6 +1356,105 @@ TOOLS.extend(
                 "additionalProperties": False,
             },
         },
+        {
+            "name": "factorio_set_realtime",
+            "description": (
+                "Toggle whether the simulation runs between your interventions. "
+                "Default is turn-based: the world is paused while you reason and "
+                "runs during submitted programs. With realtime enabled the world "
+                "keeps running while you reason at the chosen speed (1x-10x, "
+                "never below 1x); disable it to pause immediately. Simulation "
+                "accounting still uses authoritative ticks, so scores, receipts, "
+                "and deadlines are unaffected; observations report the current "
+                "mode under `realtime`."
+            ),
+            "inputSchema": {
+                "type": "object",
+                "properties": {
+                    "enabled": {"type": "boolean"},
+                    "speed": {"type": "number", "minimum": 1, "maximum": 10},
+                },
+                "required": ["enabled"],
+                "additionalProperties": False,
+            },
+        },
+        _read_only_tool(
+            "factorio_list_program_templates",
+            "List saved program templates for this lease: name, description, parameter names, version and usage count.",
+            {},
+        ),
+        {
+            "name": "factorio_get_program_template",
+            "description": "Read one saved program template, including its code and parameter specs.",
+            "inputSchema": {
+                "type": "object",
+                "properties": {"name": {"type": "string"}},
+                "required": ["name"],
+                "additionalProperties": False,
+            },
+        },
+        {
+            "name": "factorio_save_program_template",
+            "description": (
+                "Save a reusable program template. The body is a normal sandbox "
+                "program that may use {{parameter}} placeholders declared in "
+                "`parameters` (each with a default). The template is expanded "
+                "with its defaults and validated by the same program policy "
+                "before it is stored, so it can only use canonical tools and "
+                "grant no new powers. Arguments are JSON values; enum symbols "
+                "like Prototype.X must appear directly in the body."
+            ),
+            "inputSchema": {
+                "type": "object",
+                "properties": {
+                    "name": {"type": "string"},
+                    "code": {"type": "string"},
+                    "description": {"type": "string"},
+                    "parameters": {
+                        "type": "array",
+                        "items": {
+                            "type": "object",
+                            "properties": {
+                                "name": {"type": "string"},
+                                "description": {"type": "string"},
+                                "default": {},
+                            },
+                            "required": ["name", "default"],
+                            "additionalProperties": False,
+                        },
+                    },
+                },
+                "required": ["name", "code"],
+                "additionalProperties": False,
+            },
+        },
+        {
+            "name": "factorio_run_program_template",
+            "description": (
+                "Run a saved program template as one intervention, with optional "
+                "JSON arguments. The receipt records the template name and the "
+                "expanded code hash."
+            ),
+            "inputSchema": {
+                "type": "object",
+                "properties": {
+                    "name": {"type": "string"},
+                    "arguments": {"type": "object"},
+                },
+                "required": ["name"],
+                "additionalProperties": False,
+            },
+        },
+        {
+            "name": "factorio_delete_program_template",
+            "description": "Delete one saved program template by name.",
+            "inputSchema": {
+                "type": "object",
+                "properties": {"name": {"type": "string"}},
+                "required": ["name"],
+                "additionalProperties": False,
+            },
+        },
     ]
 )
 
@@ -1376,10 +1476,14 @@ MEMORY_TOOL_NAMES = {
 
 EXCLUSIVE_TOOL_NAMES = {
     "factorio_set_camera",
+    "factorio_set_realtime",
     "factorio_execute_program",
     "factorio_check_throughput",
     "factorio_memory_write",
     "factorio_memory_delete",
+    "factorio_save_program_template",
+    "factorio_run_program_template",
+    "factorio_delete_program_template",
 }
 SERIAL_LIVE_READ_TOOL_NAMES = {
     "factorio_get_craft_plan",
@@ -1818,6 +1922,65 @@ def _call_tool(
             ), False
         if name.endswith("factorio_set_camera"):
             return _camera_call(arguments), False
+        if name.endswith("factorio_set_realtime"):
+            payload: dict[str, object] = {
+                "enabled": bool(arguments.get("enabled"))
+            }
+            if arguments.get("speed") is not None:
+                payload["speed"] = arguments["speed"]
+            return _bounded_json_text(
+                _envd(
+                    "POST",
+                    f"/v1/leases/{lease_id}/realtime",
+                    payload,
+                )
+            ), False
+        if name.endswith("factorio_list_program_templates"):
+            return _bounded_json_text(
+                _envd("GET", f"/v1/leases/{lease_id}/templates")
+            ), False
+        if name.endswith("factorio_get_program_template"):
+            template_name = str(arguments.get("name", ""))
+            return _bounded_json_text(
+                _envd(
+                    "GET",
+                    f"/v1/leases/{lease_id}/templates/"
+                    f"{urllib.parse.quote(template_name)}",
+                )
+            ), False
+        if name.endswith("factorio_save_program_template"):
+            template_name = str(arguments.get("name", ""))
+            return _bounded_json_text(
+                _envd(
+                    "PUT",
+                    f"/v1/leases/{lease_id}/templates/"
+                    f"{urllib.parse.quote(template_name)}",
+                    {
+                        "code": arguments.get("code", ""),
+                        "description": arguments.get("description", ""),
+                        "parameters": arguments.get("parameters", []),
+                    },
+                )
+            ), False
+        if name.endswith("factorio_run_program_template"):
+            template_name = str(arguments.get("name", ""))
+            return _bounded_json_text(
+                _envd(
+                    "POST",
+                    f"/v1/leases/{lease_id}/templates/"
+                    f"{urllib.parse.quote(template_name)}/run",
+                    {"arguments": arguments.get("arguments", {})},
+                )
+            ), False
+        if name.endswith("factorio_delete_program_template"):
+            template_name = str(arguments.get("name", ""))
+            return _bounded_json_text(
+                _envd(
+                    "DELETE",
+                    f"/v1/leases/{lease_id}/templates/"
+                    f"{urllib.parse.quote(template_name)}",
+                )
+            ), False
         if name.endswith("factorio_observe_factory"):
             observation = _envd(
                 "GET",
@@ -2014,11 +2177,17 @@ def main() -> None:
                     "This lease-bound server exposes direct observe/execute, "
                     "bounded public state retrieval, "
                     "callable API/game-data reference, and optional session "
-                    "memory tools. Independent reference and artifact reads may run "
-                    "in parallel; live reads and mutations are ordered at the lease "
-                    "boundary. Use the execute tool's code argument for "
-                    "synchronous programmatic FLE action composition. Memory is "
-                    "disabled unless MEMORY_ENABLED is set by the evaluation profile."
+                    "memory tools. Reusable agent-authored programs can be saved "
+                    "and replayed with the program template tools; reusable "
+                    "factory fragments use the in-program blueprint library. "
+                    "The default pacing is turn-based (paused while you think); "
+                    "factorio_set_realtime can opt into a running world at 1x-10x "
+                    "when the task allows it. Independent reference and artifact "
+                    "reads may run in parallel; live reads and mutations are "
+                    "ordered at the lease boundary. Use the execute tool's code "
+                    "argument for synchronous programmatic FLE action composition. "
+                    "Memory is disabled unless MEMORY_ENABLED is set by the "
+                    "evaluation profile."
                 ),
             }
         elif method == "tools/list":

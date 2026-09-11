@@ -702,3 +702,97 @@ def test_mcp_does_not_treat_empty_static_contract_view_as_terminal(
 
     assert is_error is False
     assert not terminal_file.exists()
+
+
+def test_mcp_template_and_realtime_tools_expose_routing():
+    tools = {
+        tool["name"]: tool
+        for tool in factorio_codex_mcp.tools_for_profile(memory_enabled=False)
+    }
+    for name in (
+        "factorio_set_realtime",
+        "factorio_list_program_templates",
+        "factorio_get_program_template",
+        "factorio_save_program_template",
+        "factorio_run_program_template",
+        "factorio_delete_program_template",
+    ):
+        assert name in tools
+
+    set_realtime = tools["factorio_set_realtime"]["inputSchema"]
+    assert set_realtime["required"] == ["enabled"]
+    assert set_realtime["properties"]["speed"]["minimum"] == 1
+    assert set_realtime["properties"]["speed"]["maximum"] == 10
+    run_schema = tools["factorio_run_program_template"]["inputSchema"]
+    assert run_schema["required"] == ["name"]
+
+    assert (
+        factorio_codex_mcp._tool_route("factorio_set_realtime")["route"]
+        == "exclusive_mutation"
+    )
+    assert (
+        factorio_codex_mcp._tool_route("factorio_run_program_template")["route"]
+        == "exclusive_mutation"
+    )
+    assert (
+        factorio_codex_mcp._tool_route("factorio_list_program_templates")["route"]
+        == "parallel_read"
+    )
+
+
+def test_mcp_realtime_and_template_dispatch_use_lease_endpoints(monkeypatch):
+    calls = []
+
+    def fake_envd(method, path, payload=None):
+        calls.append((method, path, payload))
+        return {"ok": True}
+
+    monkeypatch.setenv("LEASE_ID", "lease-42")
+    monkeypatch.setattr(factorio_codex_mcp, "_envd", fake_envd)
+
+    factorio_codex_mcp._call_tool(
+        "factorio_set_realtime", {"enabled": True, "speed": 3}
+    )
+    factorio_codex_mcp._call_tool(
+        "factorio_save_program_template",
+        {
+            "name": "refuel",
+            "code": "print(1)",
+            "description": "d",
+            "parameters": [{"name": "n", "default": 1}],
+        },
+    )
+    factorio_codex_mcp._call_tool(
+        "factorio_run_program_template",
+        {"name": "refuel", "arguments": {"n": 2}},
+    )
+    factorio_codex_mcp._call_tool(
+        "factorio_list_program_templates", {}
+    )
+    factorio_codex_mcp._call_tool(
+        "factorio_delete_program_template", {"name": "refuel"}
+    )
+
+    assert calls == [
+        (
+            "POST",
+            "/v1/leases/lease-42/realtime",
+            {"enabled": True, "speed": 3},
+        ),
+        (
+            "PUT",
+            "/v1/leases/lease-42/templates/refuel",
+            {
+                "code": "print(1)",
+                "description": "d",
+                "parameters": [{"name": "n", "default": 1}],
+            },
+        ),
+        (
+            "POST",
+            "/v1/leases/lease-42/templates/refuel/run",
+            {"arguments": {"n": 2}},
+        ),
+        ("GET", "/v1/leases/lease-42/templates", None),
+        ("DELETE", "/v1/leases/lease-42/templates/refuel", None),
+    ]

@@ -39,6 +39,7 @@ from fle.envd.models import (
     VerifierEvent,
 )
 from fle.envd.program_policy import ProgramPolicyViolation, validate_program
+from fle.envd.templates import expand_template, validate_parameters
 
 
 @dataclass
@@ -61,6 +62,15 @@ class _LeaseRecord:
     # Model-managed memory is lease-scoped so it survives MCP subprocess
     # restarts while remaining isolated from every other evaluation session.
     memory: SessionMemory = field(default_factory=SessionMemory)
+
+
+def _template_view(record: Any) -> dict[str, Any]:
+    """Full template projection for save/get responses."""
+
+    view = record.summary()
+    view["code"] = record.code
+    view["parameter_specs"] = record.parameters or []
+    return view
 
 
 class EnvironmentService:
@@ -360,6 +370,7 @@ class EnvironmentService:
         code: str,
         *,
         request_id: str | None = None,
+        template: str | None = None,
     ) -> ExecutionResult:
         if not code.strip():
             raise ValueError("code must not be empty")
@@ -419,6 +430,7 @@ class EnvironmentService:
                     result=f"ProgramPolicyViolation: {violation}",
                     ticks=observation.ticks,
                     policy_violations=[violation],
+                    template=template,
                 )
                 result = ExecutionResult(
                     lease_id=lease_id,
@@ -442,7 +454,9 @@ class EnvironmentService:
                     ],
                 )
             else:
-                result = record.worker.execute(lease_id, code, sequence=sequence)
+                result = record.worker.execute(
+                    lease_id, code, sequence=sequence, template=template
+                )
                 candidate = record.worker.pop_throughput_audit_candidate()
                 if candidate is not None:
                     try:
@@ -587,6 +601,94 @@ class EnvironmentService:
             )
             self._renew(record)
             return result
+
+    # -- pacing and program templates --------------------------------------
+
+    def set_realtime(
+        self,
+        lease_id: str,
+        *,
+        enabled: bool,
+        speed: float | None = None,
+    ) -> dict[str, Any]:
+        """Toggle autonomous simulation between agent interventions."""
+
+        record = self._live_record(lease_id)
+        with record.lock:
+            result = record.worker.set_realtime(lease_id, enabled=enabled, speed=speed)
+            self._renew(record)
+            return result
+
+    def list_templates(self, lease_id: str) -> dict[str, Any]:
+        record = self._live_record(lease_id)
+        with record.lock:
+            summaries = record.worker.template_store.list_summaries()
+            self._renew(record)
+            return {"templates": summaries}
+
+    def get_template(self, lease_id: str, name: str) -> dict[str, Any]:
+        record = self._live_record(lease_id)
+        with record.lock:
+            stored = record.worker.template_store.get(name)
+            self._renew(record)
+            return _template_view(stored)
+
+    def save_template(
+        self,
+        lease_id: str,
+        name: str,
+        *,
+        code: str,
+        description: str = "",
+        parameters: Any = None,
+    ) -> dict[str, Any]:
+        """Validate and store a program template.
+
+        The template is expanded with its own defaults and run through the
+        canonical program policy before it is stored, so only templates that
+        would execute as a legal program can enter the library.
+        """
+
+        record = self._live_record(lease_id)
+        with record.lock:
+            normalized = validate_parameters(parameters)
+            expanded = expand_template(code, normalized, None)
+            validate_program(expanded, action_profile=record.lease.task.action_profile)
+            stored = record.worker.template_store.save(
+                name,
+                code,
+                description=description,
+                parameters=normalized,
+            )
+            self._renew(record)
+            return _template_view(stored)
+
+    def delete_template(self, lease_id: str, name: str) -> dict[str, Any]:
+        record = self._live_record(lease_id)
+        with record.lock:
+            deleted = record.worker.template_store.delete(name)
+            self._renew(record)
+            return {"deleted": bool(deleted), "name": name}
+
+    def run_template(
+        self,
+        lease_id: str,
+        name: str,
+        *,
+        arguments: dict[str, Any] | None = None,
+        request_id: str | None = None,
+    ) -> ExecutionResult:
+        """Expand a stored template and execute it as one intervention."""
+
+        record = self._live_record(lease_id)
+        with record.lock:
+            expanded, _tick = record.worker.run_template(lease_id, name, arguments)
+            return self.execute(
+                lease_id,
+                expanded,
+                request_id=request_id,
+                template=name,
+            )
 
     def camera(
         self,

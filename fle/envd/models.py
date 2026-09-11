@@ -406,9 +406,19 @@ class FactorioTaskSpec(WireModel):
     blueprint_scope: str | None = Field(
         default=None,
         description=(
-            "Blueprint store scope. None keeps blueprints ephemeral to the "
-            "lease (benchmark default); a lineage id shares saved blueprints "
-            "across a training generation."
+            "Blueprint store scope. None derives the scope from lineage_id "
+            "(artifacts persist for the map lineage) and falls back to "
+            "lease-ephemeral storage when no lineage exists. An explicit value "
+            "overrides the lineage derivation."
+        ),
+    )
+    template_scope: str | None = Field(
+        default=None,
+        description=(
+            "Program template store scope. None derives the scope from "
+            "lineage_id (templates persist for the map lineage) and falls back "
+            "to lease-ephemeral storage when no lineage exists. An explicit "
+            "value overrides the lineage derivation."
         ),
     )
     lineage_id: str | None = Field(
@@ -424,6 +434,15 @@ class FactorioTaskSpec(WireModel):
     factorio_version: str = "2.0.77"
     checkpoint_id: str = "scenario:open_world"
     action_profile: str = "semantic-motor-v1"
+    realtime_allowed: bool = Field(
+        default=True,
+        description=(
+            "Whether the agent may enable realtime pacing via "
+            "factorio_set_realtime. Evaluation configs set this to False to "
+            "force paused-while-thinking; the default permits realtime up to "
+            "the execution speed (10x by default)."
+        ),
+    )
     max_interventions: int | None = Field(
         default=8,
         ge=1,
@@ -550,6 +569,7 @@ class ActionEvent(WireModel):
     ticks_elapsed: int = Field(default=0, ge=0)
     executed_tools: list[str] = Field(default_factory=list)
     policy_violations: list[str] = Field(default_factory=list)
+    template: str | None = None
 
 
 class CustomerDepotView(WireModel):
@@ -678,6 +698,20 @@ class ExecutionResult(WireModel):
     terminal_reason: str | None = None
 
 
+class RealtimeState(WireModel):
+    """Whether the simulation keeps running between agent interventions.
+
+    This is a pacing control, not a determinism input: simulation accounting
+    always uses authoritative game ticks.  ``enabled`` means the world stays
+    unpaused while the model reasons; ``speed`` is the execution speed used
+    while it runs (1x-10x, never below 1x).
+    """
+
+    enabled: bool = False
+    speed: float = 10.0
+    paused: bool = True
+
+
 class Observation(WireModel):
     lease_id: str
     task_id: str
@@ -709,6 +743,8 @@ class Observation(WireModel):
     customer_depots: list[CustomerDepotView] = Field(default_factory=list)
     customer_delivery: DepotDeliveryTelemetry | None = None
     blueprints: list["BlueprintSummary"] = Field(default_factory=list)
+    templates: list["ProgramTemplateSummary"] = Field(default_factory=list)
+    realtime: "RealtimeState" = Field(default_factory=RealtimeState)
 
 
 class BlueprintSummary(WireModel):
@@ -718,6 +754,24 @@ class BlueprintSummary(WireModel):
     entity_count: int = 0
     times_placed: int = 0
     content_sha256: str = ""
+
+
+class ProgramTemplateSummary(WireModel):
+    """Student-visible template library entry (body stays server-side)."""
+
+    name: str
+    description: str = ""
+    parameters: list[str] = Field(default_factory=list)
+    version: int = 1
+    body_sha256: str = ""
+    times_run: int = 0
+
+
+class ProgramTemplateView(ProgramTemplateSummary):
+    """Full template view returned by get/save calls."""
+
+    code: str = ""
+    parameter_specs: list[dict[str, Any]] = Field(default_factory=list)
 
 
 class OpenContractView(WireModel):

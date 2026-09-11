@@ -1,4 +1,5 @@
 import hashlib
+import inspect
 import json
 
 import importlib
@@ -259,6 +260,30 @@ class LuaScriptManager:
                     print(f"Error in post-tool hook for {tool_name}: {e}")
 
                 return result
+
+            # Tools whose ``__call__`` dispatches on a string command (e.g.
+            # ``blueprint('save', ...)``) also expose their command methods as
+            # call-through shims so ``blueprint.save(...)`` works and still
+            # routes through the hook wrapper.  Without this the namespace
+            # exposes a function, and method syntax raises AttributeError.
+            try:
+                signature = inspect.signature(original_callable.__call__)
+                parameters = list(signature.parameters)
+                dispatches_on_command = bool(parameters) and parameters[0] == "command"
+            except (TypeError, ValueError):
+                dispatches_on_command = False
+            if dispatches_on_command:
+                for attribute_name in dir(original_callable):
+                    if attribute_name.startswith("_"):
+                        continue
+                    attribute = getattr(original_callable, attribute_name)
+                    if not callable(attribute):
+                        continue
+
+                    def method_shim(*args, _method=attribute_name, **kwargs):
+                        return wrapper(_method, *args, **kwargs)
+
+                    setattr(wrapper, attribute_name, method_shim)
 
             return wrapper
 

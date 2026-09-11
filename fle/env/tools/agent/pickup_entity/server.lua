@@ -46,11 +46,28 @@ storage.actions.pickup_entity = function(player_index, x, y, entity)
                 --    end
                 --end
 
-                -- Add chest contents if applicable
-                if ent.get_inventory(defines.inventory.chest) then
-                    local chest_contents = storage.utils.get_contents_compat(ent.get_inventory(defines.inventory.chest))
-                    for name, count in pairs(chest_contents) do
-                        table.insert(items_to_insert, {name=name, count=count})
+                -- Add all entity inventories if applicable. This covers chests,
+                -- lab input, assembling machine input/output, furnace
+                -- source/result/fuel, module slots and similar. Previously only
+                -- chest contents were preserved, so picking up a lab destroyed
+                -- its science packs.
+                --
+                -- Many names in ``defines.inventory`` alias the same numeric
+                -- inventory id, and each ``get_inventory`` call returns a fresh
+                -- handle, so dedupe on the id itself to avoid counting the same
+                -- inventory (and duplicating its items) once per alias.
+                local seen_inventory_ids = {}
+                for _, inventory_id in pairs(defines.inventory) do
+                    if type(inventory_id) == "number"
+                        and not seen_inventory_ids[inventory_id] then
+                        seen_inventory_ids[inventory_id] = true
+                        local ok, inv = pcall(function() return ent.get_inventory(inventory_id) end)
+                        if ok and inv then
+                            local contents = storage.utils.get_contents_compat(inv)
+                            for name, count in pairs(contents) do
+                                table.insert(items_to_insert, {name=name, count=count})
+                            end
+                        end
                     end
                 end
 
