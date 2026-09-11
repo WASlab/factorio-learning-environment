@@ -85,9 +85,10 @@ Native asynchronous work and event-oriented waits:
     factorio_get_craft_plan exposes the same read without a program intervention.
 - queue_craft(Prototype.X, quantity=1) -> {handle, crafted, queued, queued_crafts, partial, tick}
     quantity and queued count output items; recipes round up to whole crafts.
-    In fast mode the craft completes within the same intervention and the items
-    are immediately available; partial results are reported explicitly and
-    failures include craft_plan. Temporal mode keeps the native craft queue.
+    The craft completes within the same intervention so the items are
+    immediately available; partial results are reported explicitly and
+    failures include craft_plan. Only ingredients already in the inventory
+    are consumed.
 - get_craft_queue() -> {active, queue, tick}; cancel_craft(index=1, quantity=None)
 - craft_item(...) is blocking compatibility sugar; prefer queue_craft so hand
     crafting overlaps movement and other live actions

@@ -5,12 +5,10 @@ the character. Quantity is a positive integer number of output items; recipes
 such as copper cable can produce multiple items per execution. Factorio resolves
 required handcraftable intermediates automatically.
 
-In fast mode the craft completes within the same intervention, so the returned
-items are immediately available for placement or insertion in the same program.
-The receipt includes `handle`, `recipe`, `requested`, `crafted`, `queued`,
+The craft completes within the same intervention, so the returned items are
+immediately available for placement or insertion in the same program. The
+receipt includes `handle`, `recipe`, `requested`, `crafted`, `queued`,
 `queued_crafts`, `partial`, and `tick`. `crafted` can be less than requested
-when ingredients limit the craft; inspect `craft_plan` on failures. In temporal
-mode the craft is queued natively instead and completes over game ticks; use
-`get_craft_queue()` or `wait(..., until={"craft_queue": {"active": False}})` to
-observe completion. Crafting never creates items the character cannot afford,
-because every ingredient is consumed from the existing inventory.
+when ingredients limit the craft; inspect `craft_plan` on failures. Crafting
+never creates items the character cannot afford, because every ingredient is
+consumed from the existing inventory.
