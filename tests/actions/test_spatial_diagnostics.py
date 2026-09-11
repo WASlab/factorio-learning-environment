@@ -42,6 +42,41 @@ def test_rotated_footprint_bounds_collision_context_without_mutation():
     """)
 
 
+def test_mining_drill_without_resources_reports_dedicated_reason():
+    lua = LuaRuntime()
+    lua.execute("""
+        storage={utils={}}
+        resource_result={}
+        surface={
+            find_entities_filtered=function(query)
+                if query.type=='resource' then return resource_result end
+                return {}
+            end,
+            get_tile=function(x,y)
+                return {name='grass',collides_with=function(layer) return false end}
+            end
+        }
+        prototype={type='mining-drill',tile_width=2,tile_height=2,
+            collision_mask={layers={player=true}}}
+    """)
+    lua.execute(
+        (Path(__file__).parents[2] / "fle/env/mods/spatial_diagnostics.lua").read_text()
+    )
+    lua.execute("""
+        d=storage.utils.spatial_diagnostics(surface,{x=3,y=-70},
+            {left_top={x=-0.7,y=-0.7},right_bottom={x=0.7,y=0.7}},4,
+            prototype.collision_mask,nil,prototype)
+        assert(d.reason=='no_minable_resources')
+        assert(d.mining_area and d.mining_resources and next(d.mining_resources)==nil)
+        resource_result={{name='iron-ore'}}
+        d=storage.utils.spatial_diagnostics(surface,{x=3,y=-64},
+            {left_top={x=-0.7,y=-0.7},right_bottom={x=0.7,y=0.7}},4,
+            prototype.collision_mask,nil,prototype)
+        assert(d.reason=='engine_rules_or_route_obstruction')
+        assert(d.mining_resources['iron-ore']==1)
+    """)
+
+
 def test_path_failure_preserves_requested_goal_and_obstacles():
     reader = GetPath.__new__(GetPath)
     failure = {

@@ -1,6 +1,6 @@
 -- Bounded, read-only context. The engine decides placement/path validity;
 -- overlapping collision layers are evidence, not a substitute for that check.
-storage.utils.spatial_diagnostics = function(surface, position, box, direction, mask, ignored)
+storage.utils.spatial_diagnostics = function(surface, position, box, direction, mask, ignored, prototype)
     local angle = (direction or 0) * math.pi / 8
     local c, s = math.cos(angle), math.sin(angle)
     local left, top, right, bottom = math.huge, math.huge, -math.huge, -math.huge
@@ -13,7 +13,7 @@ storage.utils.spatial_diagnostics = function(surface, position, box, direction, 
     end
     local area = {{left, top}, {right, bottom}}
     local layers = {}
-    for name, enabled in pairs(mask.layers or {}) do
+    for name, enabled in pairs((mask and mask.layers) or {}) do
         if enabled then layers[#layers+1] = name end
     end
     local entities, terrain = {}, {}
@@ -22,11 +22,14 @@ storage.utils.spatial_diagnostics = function(surface, position, box, direction, 
     } or {}
     for _, entity in ipairs(candidates) do
         if entity.valid and entity ~= ignored and #entities < 16 then
+            local dx, dy = entity.position.x - position.x, entity.position.y - position.y
             entities[#entities+1] = {prototype=entity.name,
                 position={x=entity.position.x,y=entity.position.y},
-                entity_id=entity.unit_number, type=entity.type}
+                entity_id=entity.unit_number, type=entity.type,
+                distance=math.floor(math.sqrt(dx*dx+dy*dy)*10+0.5)/10}
         end
     end
+    table.sort(entities, function(a, b) return a.distance < b.distance end)
     local examined = 0
     local total = math.max(0, math.ceil(right)-math.floor(left)) *
         math.max(0, math.ceil(bottom)-math.floor(top))
@@ -45,10 +48,42 @@ storage.utils.spatial_diagnostics = function(surface, position, box, direction, 
         end
         if examined >= 64 then break end
     end
-    return {position=position, footprint={left_top={x=left,y=top},right_bottom={x=right,y=bottom}},
+    -- Mining drills can only be placed on resources; the engine refusal is
+    -- otherwise indistinguishable from generic placement rules.
+    local mining_area, mining_resources = nil, nil
+    if prototype and prototype.type == "mining-drill" then
+        local width = prototype.tile_width or 2
+        local height = prototype.tile_height or 2
+        mining_area = {
+            {position.x - width / 2, position.y - height / 2},
+            {position.x + width / 2, position.y + height / 2},
+        }
+        mining_resources = {}
+        for _, resource in ipairs(surface.find_entities_filtered{
+            area=mining_area, type="resource", limit=16
+        }) do
+            mining_resources[resource.name] = (mining_resources[resource.name] or 0) + 1
+        end
+    end
+    local reason
+    if #entities > 0 then
+        reason = "occupied"
+    elseif #terrain > 0 then
+        reason = "terrain_collision"
+    elseif mining_resources ~= nil and next(mining_resources) == nil then
+        reason = "no_minable_resources"
+    else
+        reason = "engine_rules_or_route_obstruction"
+    end
+    local result = {position=position, footprint={left_top={x=left,y=top},right_bottom={x=right,y=bottom}},
         overlapping_entities=entities, colliding_tiles=terrain,
         center_tile=surface.get_tile(position).name,
         entities_truncated=#candidates>16, terrain_truncated=total>examined or #terrain>=16,
-        reason=#entities>0 and "occupied" or (#terrain>0 and "terrain_collision" or "engine_rules_or_route_obstruction"),
+        reason=reason,
         evidence="local_collision_context", nearest_reachable_verified=false}
+    if mining_area ~= nil then
+        result.mining_area = mining_area
+        result.mining_resources = mining_resources
+    end
+    return result
 end

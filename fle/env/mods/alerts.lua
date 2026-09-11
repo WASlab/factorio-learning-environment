@@ -156,8 +156,26 @@ local function has_ingredients(entity)
     return true
 end
 
+local function sink_has_space(entity)
+    local inventory
+    if entity.type == "container" or entity.type == "logistic-container" then
+        inventory = entity.get_inventory(defines.inventory.chest)
+    elseif entity.type == "furnace" then
+        inventory = entity.get_inventory(defines.inventory.furnace_source)
+    elseif entity.type == "assembling-machine" then
+        inventory = entity.get_inventory(defines.inventory.assembling_machine_input)
+    else
+        -- Belts, undergrounds, and splitters always have somewhere to put items.
+        return true
+    end
+    return inventory ~= nil and not inventory.is_full()
+end
+
 local function has_output_space(entity)
-    if entity.status == defines.entity_status.waiting_for_space_in_destination then
+    -- A mining drill's status can flap to waiting_for_space between inserts even
+    -- while its sink is accepting, so evaluate the sink itself for drills.
+    if entity.status == defines.entity_status.waiting_for_space_in_destination
+        and entity.type ~= "mining-drill" then
         return false
     end
     if entity.type == "mining-drill" and entity.mining_target then
@@ -174,19 +192,13 @@ local function has_output_space(entity)
 
         local destination_entity = entity.surface.find_entities_filtered{
             position = drop_position,
-            type = {"container", "transport-belt", "underground-belt", "splitter"}
+            type = {"container", "logistic-container", "transport-belt", "underground-belt", "splitter", "furnace", "assembling-machine"}
         }[1]
 
         if #items_on_ground >= 1 then
             return false
         elseif destination_entity then
-            if destination_entity.type == "container" then
-                local chest_inventory = destination_entity.get_inventory(defines.inventory.chest)
-                return not chest_inventory.is_full()
-            else
-                -- For belts, undergrounds, and splitters, assume there's space
-                return true
-            end
+            return sink_has_space(destination_entity)
         else
             -- No destination entity, check if output inventory is not empty and can't insert more
             local resource = entity.mining_target
@@ -283,14 +295,16 @@ function storage.utils.get_issues(entity)
 
             local destination_entity = entity.surface.find_entities_filtered{
                 position = entity.drop_position,
-                type = {"container", "transport-belt", "underground-belt", "splitter", "furnace"}
+                type = {"container", "logistic-container", "transport-belt", "underground-belt", "splitter", "furnace", "assembling-machine"}
             }[1]
 
             if destination_entity then
-                if destination_entity.type == "container" then
+                if destination_entity.type == "container" or destination_entity.type == "logistic-container" then
                     table.insert(issues, "\'chest at drop position is full. Empty the chest at (" .. rounded_x .. ", " .. rounded_y .. ") to continue mining.\'")
                 elseif destination_entity.type == "furnace" then
-                    table.insert(issues, "\'furnace at drop position is blocked.\'")
+                    table.insert(issues, "\'furnace at drop position is full. Mining resumes as it smelts.\'")
+                elseif destination_entity.type == "assembling-machine" then
+                    table.insert(issues, "\'machine at drop position cannot accept more items right now.\'")
                 else
                     table.insert(issues, "\'transport belt at drop position is blocked. Clear the belt at (" .. rounded_x .. ", " .. rounded_y .. ") to continue mining.\'")
                 end

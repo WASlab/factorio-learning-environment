@@ -187,10 +187,11 @@ storage.actions.place_entity = function(player_index, entity, direction, x, y, e
     validate_entity()
     validate_inventory()
     if exact then
+        local prototype = prototypes.entity[entity]
         if not storage.utils.can_place_entity(player, entity, position, entity_direction) then
             local diagnostic = storage.utils.spatial_diagnostics(player.surface, position,
-                prototypes.entity[entity].collision_box, entity_direction,
-                prototypes.entity[entity].collision_mask)
+                prototype.collision_box, entity_direction,
+                prototype.collision_mask, nil, prototype)
             return {error=true, reason="placement_rejected", prototype=entity,
                 position=position, direction=entity_direction, diagnostics=diagnostic}
         end

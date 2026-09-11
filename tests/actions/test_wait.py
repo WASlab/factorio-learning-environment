@@ -66,6 +66,8 @@ def test_client_reports_transport_latency_and_cleans_up():
     assert (
         result["poll_latency_ticks"] == 3 and result["simulation_ticks_advanced"] == 8
     )
+    assert result["requested_seconds"] == pytest.approx(5 / 60, abs=0.001)
+    assert result["elapsed_seconds"] == pytest.approx(8 / 60, abs=0.001)
     assert result["condition_met"] is None
     tool.execute.assert_called_with("cancel", 1)
 

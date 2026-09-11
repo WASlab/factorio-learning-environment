@@ -40,13 +40,16 @@ class Wait(Tool):
                 wall_sleep(interval)
             decision = int(result["decision_tick"])
             end = int(result["tick"])
+            elapsed_ticks = end - started["start_tick"]
             return {
                 "status": result["status"],
                 "requested_ticks": ticks,
+                "requested_seconds": round(ticks / 60, 3),
                 "start_tick": started["start_tick"],
                 "deadline_tick": started["deadline_tick"],
                 "decision_tick": decision,
-                "simulation_ticks_advanced": end - started["start_tick"],
+                "simulation_ticks_advanced": elapsed_ticks,
+                "elapsed_seconds": round(elapsed_ticks / 60, 3),
                 "poll_latency_ticks": max(0, end - decision),
                 "condition_met": result["status"] == "condition_met"
                 if condition

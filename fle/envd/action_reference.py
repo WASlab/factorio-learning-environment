@@ -92,7 +92,8 @@ Native asynchronous work and event-oriented waits:
 - get_craft_queue() -> {active, queue, tick}; cancel_craft(index=1, quantity=None)
 - craft_item(...) is blocking compatibility sugar; prefer queue_craft so hand
     crafting overlaps movement and other live actions
-- wait(ticks, until=None, poll_ticks=30) waits authoritative game ticks and may
+- wait(ticks, until=None, poll_ticks=30) waits authoritative simulation ticks
+    (60 ticks = 1 game second) and may
     stop early on exactly one condition: inventory, research, craft_queue,
     production_rate, machine_status, delivery, or event. Engine samples latch the
     first match; decision_tick and poll_latency_ticks separate the decision from
