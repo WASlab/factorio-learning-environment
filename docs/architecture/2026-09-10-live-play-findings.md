@@ -380,6 +380,50 @@ All new surfaces were validated against a freshly restaged cluster + envd:
   diagnostics (which port faces what) would be the highest-value addition for
   the power bootstrap.
 
+### 20. Observability gaps that cost live-play cycles (FIXED)
+
+Debugging the coal loop exposed three recurring agent problems, all now
+addressed by first-class tools:
+
+- Placement/path failures buried the blocking entity inside nested diagnostic
+  JSON (`blocker.message`), and harnesses that truncate output lose it. The
+  shared diagnostics builder now promotes the nearest overlap as
+  `blocked_by {prototype, position, entity_id, type, distance}` and
+  `place_path` surfaces it inside `blocker.blocked_by` too.
+- There was no supported way to ask "where does this belt stop?", so belt jams
+  were diagnosed by hand-rolled RCON scripts (rebuilt five times live).
+  `trace_belt(position, max_tiles=64)` now walks the line downstream and
+  returns per-tile direction/active/lane contents plus the first blocker
+  (`end_of_line`, `blocked_by_entity` with the entity, `max_tiles_reached`).
+- There was no supported way to "step back and look" at a target without
+  hand-rolled tile dumps. `get_tile_map(center, radius=16)` now returns a
+  compact ASCII map (north up, belts drawn by flow direction, machines,
+  poles, ore, water, blocked terrain) plus a structured bounded entity list.
+
+Live root causes found by these diagnostics in the archived world: a coal
+power-line endpoint pole occupied the exact gap tile between two belt
+segments, and coal EMDs were never connected to the grid because a pole was
+placed one tile outside their supply area. Both are placement mistakes that a
+single `get_tile_map` call makes visible.
+
+## API wishlist (live-play asks)
+
+Ordered by the debugging pain each would have removed:
+
+1. `get_power_network(position)` - generator/consumer counts, satisfaction and
+   connected pole ids for the network covering a point (currently inferred
+   from `electrical_id` and manual scans).
+2. `get_fluid_network(position)` - connected fluid entities, contents and
+   port directions for water/steam chains (boiler-port debugging was blind
+   guessing plus RCON).
+3. `get_entity_ports` returned empty for boilers; it should report fluid
+   ports for boilers/engines/pipes (or the same info the diagnostics use).
+4. `trace_belt` upstream mode ("where does this line come from?") in addition
+   to downstream.
+5. `render_factory` at target is already available and underused; attaching a
+   small failure map (or an automatic target render) to placement errors would
+   make the habit unnecessary to remember.
+
 ## Session state
 
 The pre-restart world described in findings 1-16 is archived; the cluster was
@@ -396,10 +440,21 @@ Current state:
 - Milestones 0/7 on this map; the next step is a blueprint/template-assisted
   speedrun of the bootstrap (power, iron/copper, science line) before the oil
   expedition.
-- Code changes in the working tree are uncommitted: `set_research` trigger
-  message, `pickup_entity` inventory preservation (with alias dedupe),
-  `Technology.ElectricMiningDrill`, blueprint surface restore, realtime pacing,
-  program templates, lineage-scoped artifacts, and the `realtime_allowed` flag.
+- Progress since (rocket run, same lease): 2/7 milestones complete
+  (`automation-science-pack`, `logistic-science-pack`). Library now holds
+  `miner-pair` and `power-plant` blueprints; the second and third miner pairs
+  were placed by blueprint (one refunded a failed drill ghost live, and an
+  atomic `missing_materials` rejection was observed). Power uses the saved
+  plant layout plus a 20-pole line laid by `place_power_line` with the
+  wreck detour. Copper is gated on burner fuel (recurring trips); the lab is
+  fed by hand-crafted packs. `chemical-science-pack` is blocked on the
+  `oil-processing` trigger; nearest crude oil is the next expedition target.
+- 2026-09-11 restart for the organized run: the world above is archived; new
+  lease on the same lineage with `get_tile_map`, `trace_belt`, and promoted
+  `blocked_by` live. Plan for this run: coal outpost + trunk to a base plant
+  with piped lake water (closed power loop), a main bus carrying coal/iron/
+  copper/gears/circuits, and dedicated mining/smelting/assembly/science
+  districts instead of the ad-hoc sprawl of the previous map.
 
 
 

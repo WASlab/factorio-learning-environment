@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import hashlib
 
-ACTION_PROFILE_REFERENCE_ID = "semantic-motor-v1/reference-v2"
+ACTION_PROFILE_REFERENCE_ID = "semantic-motor-v1/reference-v3"
 
 ACTION_PROFILE_REFERENCE = """\
 Operate and expand a persistent factory, emphasizing autonomous production,
@@ -36,6 +36,13 @@ Core inspection and interaction:
 - nearest(Prototype.X or Resource.X) -> Position
 - get_entity(Prototype.X, position) -> Entity; resolve_entity(entity.id) -> Entity
 - get_entity_ports(entity) -> {inputs, outputs}
+- get_tile_map(center, radius=16) -> {rows, entities, legend}
+    Compact ASCII tile map (north up) with a structured entity list. Use it
+    before building and immediately after a placement stops short.
+- trace_belt(position, max_tiles=64) -> {start, tiles, blocker}
+    Follow a belt downstream: per-tile direction, active flag and lane
+    contents, then the first blocker (end_of_line, blocked_by_entity with the
+    blocking entity, or max_tiles_reached). Use it when items stop flowing.
 - move_to(target, stop_distance=0, mode='walk', waypoints=None,
     interrupt_on=None, timeout_ticks=36000) -> Position
     Open coordinates are exact; occupied coordinates resolve to the nearest
@@ -48,7 +55,8 @@ Core inspection and interaction:
 - set_entity_recipe(entity, RecipeName.X)
 
 Construction is exact and non-atomic. Earlier successful placements remain
-when a later placement fails:
+when a later placement fails. Failures expose `blocked_by` (nearest blocking
+entity with name/position) when an entity is the cause:
 - place_entity(Prototype.X, direction=Direction.UP, position=Position(x,y), exact=True)
 - place_path(prototype, points, routing='polyline', on_collision='stop',
     on_insufficient_materials='stop') -> structured partial/completed receipt

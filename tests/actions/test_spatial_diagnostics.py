@@ -88,3 +88,30 @@ def test_path_failure_preserves_requested_goal_and_obstacles():
     with pytest.raises(RuntimeError) as error:
         reader(42)
     assert json.loads(str(error.value)) == failure
+
+
+def test_diagnostics_promote_nearest_blocker_entity():
+    lua = LuaRuntime()
+    lua.execute("""
+        storage={utils={}}
+        surface={
+            find_entities_filtered=function(query)
+                return {{name='small-electric-pole', type='electric-pole', valid=true,
+                    position={x=1,y=0}, unit_number=7}}
+            end,
+            get_tile=function(x,y)
+                return {name='grass',collides_with=function(layer) return false end}
+            end
+        }
+    """)
+    lua.execute(
+        (Path(__file__).parents[2] / "fle/env/mods/spatial_diagnostics.lua").read_text()
+    )
+    lua.execute("""
+        d=storage.utils.spatial_diagnostics(surface,{x=0,y=0},
+            {left_top={x=-0.5,y=-0.5},right_bottom={x=0.5,y=0.5}},0,{layers={player=true}})
+        assert(d.reason=='occupied')
+        assert(d.blocked_by.prototype=='small-electric-pole')
+        assert(d.blocked_by.entity_id==7)
+        assert(d.blocked_by.position.x==1)
+    """)

@@ -1,9 +1,42 @@
+import json
 import math
 
 from fle.env import Direction
 from fle.env.entities import Position
 from fle.env.game_types import Prototype
 from fle.env.tools import Tool
+
+
+def _blocked_by_from_message(message: str) -> dict | None:
+    """Extract the promoted ``blocked_by`` entity from a placement failure.
+
+    Placement failures raise with a diagnostics payload embedded in the
+    exception text.  Different call layers wrap it differently, so scan for
+    the first JSON object and look for ``blocked_by`` (preferred) or fall back
+    to the nearest ``overlapping_entities`` entry.
+    """
+
+    start = message.find("{")
+    if start == -1:
+        return None
+    try:
+        payload, _ = json.JSONDecoder().raw_decode(message[start:])
+    except (ValueError, TypeError):
+        return None
+    if not isinstance(payload, dict):
+        return None
+    diagnostics = payload.get("diagnostics")
+    if isinstance(diagnostics, dict):
+        payload = diagnostics
+    blocked_by = payload.get("blocked_by")
+    if isinstance(blocked_by, dict):
+        return blocked_by
+    overlapping = payload.get("overlapping_entities")
+    if isinstance(overlapping, list) and overlapping:
+        nearest = overlapping[0]
+        if isinstance(nearest, dict):
+            return nearest
+    return None
 
 
 class PlacePath(Tool):
@@ -47,6 +80,9 @@ class PlacePath(Tool):
                     "position": {"x": position.x, "y": position.y},
                     "message": message,
                 }
+                blocked_by = _blocked_by_from_message(message)
+                if blocked_by is not None:
+                    blocker["blocked_by"] = blocked_by
                 policy = (
                     on_insufficient_materials
                     if reason == "materials_exhausted"

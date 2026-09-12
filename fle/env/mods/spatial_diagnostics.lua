@@ -81,6 +81,11 @@ storage.utils.spatial_diagnostics = function(surface, position, box, direction, 
         entities_truncated=#candidates>16, terrain_truncated=total>examined or #terrain>=16,
         reason=reason,
         evidence="local_collision_context", nearest_reachable_verified=false}
+    -- Promote the nearest blocker so callers can surface a single actionable
+    -- entity name/position instead of burying it in the entity list.
+    if #entities > 0 then
+        result.blocked_by = entities[1]
+    end
     if mining_area ~= nil then
         result.mining_area = mining_area
         result.mining_resources = mining_resources
