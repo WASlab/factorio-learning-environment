@@ -112,3 +112,15 @@ def test_client_validates_arguments_and_surfaces_errors():
     tool.execute = Mock(return_value=({"error": "no transport-belt"}, 0))
     with pytest.raises(Exception, match="Could not trace belt"):
         tool(Position(x=0, y=0))
+
+
+def test_client_normalizes_lane_arrays_to_lists():
+    from fle.env.tools.agent.trace_belt.client import _normalize_arrays
+
+    response = {
+        "tiles": {1: {"lanes": {1: {"index": 1, "items": {1: {"name": "coal"}}}}}},
+        "blocker": {"reason": "end_of_line"},
+    }
+    normalized = _normalize_arrays(response)
+    assert normalized["tiles"][0]["lanes"][0]["items"] == [{"name": "coal"}]
+    assert normalized["blocker"]["reason"] == "end_of_line"

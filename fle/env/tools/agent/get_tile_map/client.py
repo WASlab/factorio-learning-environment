@@ -2,6 +2,29 @@ from fle.env.entities import Position
 from fle.env.tools import Tool
 
 
+def _normalize_arrays(value):
+    """Convert integer-keyed mappings into lists, recursively.
+
+    Lua array tables arrive through the RCON result parser as dicts keyed by
+    rank (``{1: ..., 2: ...}``); callers expect plain lists.
+    """
+
+    if isinstance(value, dict):
+        keys = list(value.keys())
+        if keys and all(
+            isinstance(key, (int, str)) and str(key).lstrip("-").isdigit()
+            for key in keys
+        ):
+            return [
+                _normalize_arrays(value[key])
+                for key in sorted(keys, key=lambda key: int(key))
+            ]
+        return {key: _normalize_arrays(item) for key, item in value.items()}
+    if isinstance(value, list):
+        return [_normalize_arrays(item) for item in value]
+    return value
+
+
 class GetTileMap(Tool):
     def __call__(self, center: Position, radius: int = 16) -> dict:
         """Render a compact tile/entity map around a point.
@@ -27,4 +50,4 @@ class GetTileMap(Tool):
             raise Exception(  # noqa: TRY002 - matches the tool error convention
                 f"Could not build tile map at {center}: {message}"
             )
-        return response
+        return _normalize_arrays(response)

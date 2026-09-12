@@ -2,6 +2,25 @@ from fle.env.entities import Position
 from fle.env.tools import Tool
 
 
+def _normalize_arrays(value):
+    """Convert integer-keyed mappings into lists, recursively."""
+
+    if isinstance(value, dict):
+        keys = list(value.keys())
+        if keys and all(
+            isinstance(key, (int, str)) and str(key).lstrip("-").isdigit()
+            for key in keys
+        ):
+            return [
+                _normalize_arrays(value[key])
+                for key in sorted(keys, key=lambda key: int(key))
+            ]
+        return {key: _normalize_arrays(item) for key, item in value.items()}
+    if isinstance(value, list):
+        return [_normalize_arrays(item) for item in value]
+    return value
+
+
 class TraceBelt(Tool):
     def __call__(self, position: Position, max_tiles: int = 64) -> dict:
         """Follow a belt downstream and report where flow stops.
@@ -11,8 +30,6 @@ class TraceBelt(Tool):
         downstream tile that cannot accept items: ``end_of_line`` when no belt
         follows, ``blocked_by_entity`` (with the blocking entity) when a
         non-belt entity occupies the next tile, or ``max_tiles_reached``.
-        Broken or wrong-facing belt segments show up as an ``end_of_line`` or
-        a direction change that does not match the previous flow direction.
 
         :param position: Position of any belt tile in the line
         :param max_tiles: Maximum number of belt tiles to follow (1-256)
@@ -24,12 +41,10 @@ class TraceBelt(Tool):
         max_tiles = int(max_tiles)
         if not 1 <= max_tiles <= 256:
             raise ValueError("max_tiles must be between 1 and 256")
-        response, _ = self.execute(
-            self.player_index, position.x, position.y, max_tiles
-        )
+        response, _ = self.execute(self.player_index, position.x, position.y, max_tiles)
         if not isinstance(response, dict) or "tiles" not in response:
             message = str(response).split(":")[-1].strip()
             raise Exception(  # noqa: TRY002 - matches the tool error convention
                 f"Could not trace belt at {position}: {message}"
             )
-        return response
+        return _normalize_arrays(response)

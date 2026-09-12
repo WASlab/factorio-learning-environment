@@ -92,3 +92,12 @@ def test_client_validates_center_and_radius():
     tool.execute = Mock(return_value=(True, 0))
     with pytest.raises(Exception, match="Could not build tile map"):
         tool(Position(x=0, y=0))
+
+
+def test_client_normalizes_lua_arrays_to_lists():
+    from fle.env.tools.agent.get_tile_map.client import _normalize_arrays
+
+    assert _normalize_arrays({1: "a", 2: "b"}) == ["a", "b"]
+    assert _normalize_arrays(
+        {"rows": {1: "x"}, "entities": {1: {"position": {1: 3, 2: 4}}}}
+    ) == {"rows": ["x"], "entities": [{"position": [3, 4]}]}
