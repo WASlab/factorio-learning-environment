@@ -118,6 +118,26 @@ Native asynchronous work and event-oriented waits:
 - queue_research([Technology.X, Technology.Y]) appends enabled technologies to
     Factorio's native queue; set_research(Technology.X) replaces the queue
 - get_research_progress(Technology.X)
+- get_technology(Technology.X or 'technology-name') reads live researchability,
+    prerequisites, successors, science cost, effects/unlocks and research_trigger.
+    can_queue is false for trigger research; researchable means its prerequisites
+    are met. get_available_technologies(limit=64, offset=0) lists these candidates.
+- get_research_queue() reads the native ordered queue and current progress.
+- get_recipes_using(Prototype.X, category='item', limit=64, offset=0) finds
+    consuming recipes, including locked recipes; category may also be 'fluid'.
+- get_logistic_network(position, limit=64, offset=0) reads network contents,
+    roboport count and available/total robots inside logistic coverage.
+- get_circuit_network(position, wire='red', connector_id=None, limit=64, offset=0)
+    reads signals per connector and combinator parameters. Inputs/outputs stay
+    separate. wire may be 'green'; reading never creates a connection.
+- get_trains(limit=32, offset=0) reads this force's trains on the current surface:
+    schedules, states, destinations, cargo and fuel. get_train_stop(position,
+    limit=64, offset=0) reads a stop's limits, association count and scheduled IDs.
+- get_pollution(position, radius_chunks=0) reads generated chunks (32 tiles each),
+    with radius 0-8; ungenerated chunks omit pollution, matching camera visibility.
+- get_force_bonuses() reads research modifiers for production, robots,
+    inserters, braking, character capabilities and ammo.
+    Paginated reads report total/offset/truncated; pages are fresh live reads.
 
 Blueprint library (reusable factory fragments):
 - blueprint('save', name, x, y, radius=32) captures force-owned entities in

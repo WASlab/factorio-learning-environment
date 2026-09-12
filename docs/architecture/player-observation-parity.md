@@ -138,3 +138,43 @@ Isolated 2.0.77 validation covers furnace completion, exact deadline decisions,
 transport-latency reporting, and native production/consumption totals and rates.
 Lua tests cover transient condition retention and sampling between poll boundaries;
 Python tests cover validation, cancellation, and failure-preserving cleanup.
+
+## Additional player information reads
+
+The research screen has live `get_technology`, `get_available_technologies`,
+and `get_research_queue` actions alongside the existing pinned technology
+reference. Live queries distinguish enabled/prerequisite-ready research from
+queueable lab research: trigger technologies expose their native trigger and
+cannot be queued. Costs and progress use current force state and research level.
+
+`get_recipes_using` supplies Factoriopedia's inverse recipe lookup, including
+locked recipes. Forward recipe and prototype facts retain the existing tools
+and pinned reference surface. `get_logistic_network` reads native network
+contents and robot counts; `get_circuit_network` reads each wire connector's
+signals separately, preserving combinator input/output boundaries.
+
+`get_trains` and `get_train_stop` expose schedules, states, destinations,
+cargo/fuel and station limits/associations for the character's force and
+surface. Scheduled trains are distinguished from the engine's inbound/stopped
+association count. `get_force_bonuses` exposes native research modifiers.
+`get_pollution` reads a bounded square of generated chunks without generating
+terrain. It follows the camera's generated-surface visibility: detached agent
+characters do not maintain a LuaPlayer chart. Unknown chunks omit pollution.
+
+These are on-demand native reads, with no new periodic world scans, hidden
+verifier data, recommendations, route choices, or inferred bottlenecks. Lists
+support bounded pages and report total/offset/truncated; pages are live reads,
+not a stable snapshot across changing simulation state. The existing public
+alert journal and production-statistics action remain the authoritative
+surfaces for those already implemented suggestions.
+
+The action signatures and response semantics live in each tool's
+[`agent.md`](../../fle/env/tools/agent/) and the
+[canonical action reference](../../fle/envd/action_reference.py).
+
+Validation: one focused live acceptance test on a dedicated Factorio 2.0.77
+server covers these reads through their Python/Lua boundary; one offline test
+covers array decoding and error propagation. Existing knowledge/reference and
+runtime identity checks also pass. Live acceptance command (isolated server
+required): `FACTORIO_RCON_PORT=27020 uv run pytest -m ''
+tests/actions/test_player_information.py`.
