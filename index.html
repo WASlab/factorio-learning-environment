@@ -28,7 +28,7 @@
       </a>
       <nav aria-label="Primary navigation">
         <a href="blog/">Blog</a>
-        <a href="#iteration">Iteration 01</a>
+        <a href="#iteration">Planning and automation</a>
         <a href="#next">Next design</a>
         <a href="https://github.com/HumanDotPy/FactorioAgentBench">GitHub</a>
       </nav>
@@ -39,7 +39,7 @@
         <img
           class="hero-image"
           src="assets/current-factory.png"
-          alt="Factorio map from the current evaluation, showing a small disconnected factory amid resource patches"
+          alt="Factorio map showing machines and resource patches"
         />
         <div class="hero-shade" aria-hidden="true"></div>
         <div class="hero-content">
@@ -52,124 +52,59 @@
           </p>
           <div class="hero-actions">
             <a class="button button-primary" href="blog/">Read the blog</a>
-            <a class="button button-secondary" href="#iteration">Read the iteration report</a>
+            <a class="button button-secondary" href="#iteration">Read about closed-loop production</a>
           </div>
-          <p class="capture-note">Live evaluation capture · August 31, 2026</p>
-        </div>
-      </section>
-
-      <section class="snapshot" aria-labelledby="snapshot-title">
-        <div class="section-inner">
-          <div class="section-heading">
-            <p class="eyebrow">Observed state</p>
-            <h2 id="snapshot-title">Production happened. The factory did not.</h2>
-            <p>
-              Muse Spark 1.2 produced electronic circuits, but the placed topology
-              remained sparse and mostly stalled. The run exposed a benchmark-design
-              problem rather than a missing crafting capability.
-            </p>
-          </div>
-          <dl class="metric-strip">
-            <div>
-              <dt>Circuits produced</dt>
-              <dd>330</dd>
-            </div>
-            <div>
-              <dt>Belts placed</dt>
-              <dd class="metric-warning">0</dd>
-            </div>
-            <div>
-              <dt>Assemblers placed</dt>
-              <dd class="metric-warning">0</dd>
-            </div>
-            <div>
-              <dt>Mining drills</dt>
-              <dd>4</dd>
-            </div>
-            <div>
-              <dt>Inserters</dt>
-              <dd>2</dd>
-            </div>
-          </dl>
-          <p class="method-note">
-            Snapshot counts are descriptive, not a score. At capture time, three drills
-            were blocked, one lacked fuel, and the inserters were waiting for source items.
-          </p>
+          <p class="capture-note">Factorio environment capture · August 31, 2026</p>
         </div>
       </section>
 
       <section class="iteration" id="iteration" aria-labelledby="iteration-title">
         <div class="section-inner editorial-grid">
-          <div class="section-heading sticky-heading">
-            <p class="eyebrow">Iteration 01</p>
-            <h2 id="iteration-title">What the environment taught us</h2>
+          <div class="section-heading">
+            <p class="eyebrow">Planning and automation</p>
+            <h2 id="iteration-title">A factory has to keep itself running</h2>
             <p>
-              The harness became substantially more capable and observable. That made
-              the remaining incentive problem easier to see.
+              High benchmark scores alone do not establish that an agent can build
+              a sustainable Factorio factory. The useful question is whether its
+              plan accounts for every dependency needed to keep production running.
             </p>
           </div>
           <div class="findings">
             <article>
               <span class="finding-index">01</span>
               <div>
-                <h3>Manual batches remain locally rational</h3>
+                <h3>Close the power and fuel loop</h3>
                 <p>
-                  One-shot quantity contracts can be satisfied through mining and hand
-                  crafting. The agent receives progress without paying the planning cost
-                  of belts, inserters, assemblers, power, and balanced topology.
+                  A coal-powered factory needs a continuing fuel supply. Its miners
+                  and fuel transport may themselves depend on the power they help
+                  generate. A workable plan must bootstrap that loop and keep it
+                  supplied after the initial fuel runs out.
                 </p>
               </div>
             </article>
             <article>
               <span class="finding-index">02</span>
               <div>
-                <h3>Last-mile automation is not end-to-end automation</h3>
+                <h3>Connect the whole production chain</h3>
                 <p>
-                  Depot inserters can automate delivery while all upstream production
-                  remains manual. Delivery automation must not stand in for autonomous
-                  resource extraction and production.
+                  Working machines are only part of the problem. Extraction,
+                  transport, power, crafting, and output handling must work together
+                  without repeated manual refueling or inventory transfers.
                 </p>
               </div>
             </article>
             <article>
               <span class="finding-index">03</span>
               <div>
-                <h3>Persistent feedback now survives the rollout</h3>
+                <h3>Measure sustained operation</h3>
                 <p>
-                  Contract receipts, state retrieval, resumable snapshots, bounded tool
-                  history, memory, and optional vision are now available. The agent has
-                  better feedback; it still chooses the cheaper manual policy.
-                </p>
-              </div>
-            </article>
-            <article>
-              <span class="finding-index">04</span>
-              <div>
-                <h3>The metric is shaping the behavior</h3>
-                <p>
-                  Counting delivered items rewards the output but misses the productive
-                  system behind it. The next design should measure expansion of a
-                  sustainable production frontier.
+                  A burst of items can come from hand crafting or a stocked buffer.
+                  Sustained output after the agent stops acting is a stronger test
+                  of whether it built a productive system.
                 </p>
               </div>
             </article>
           </div>
-        </div>
-      </section>
-
-      <section class="chain" aria-labelledby="chain-title">
-        <div class="section-inner">
-          <div class="section-heading">
-            <p class="eyebrow">Capability chain</p>
-            <h2 id="chain-title">Where autonomy currently breaks</h2>
-          </div>
-          <ol class="capability-chain">
-            <li class="reached"><span>Mine resources</span><strong>Reached manually</strong></li>
-            <li class="partial"><span>Build production hardware</span><strong>Partial</strong></li>
-            <li class="missing"><span>Place belts and assemblers</span><strong>Not reached</strong></li>
-            <li class="missing"><span>Configure connected topology</span><strong>Not reached</strong></li>
-            <li class="missing"><span>Sustain unattended output</span><strong>Not reached</strong></li>
-          </ol>
         </div>
       </section>
 
