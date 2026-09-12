@@ -28,6 +28,7 @@ runtime compatibility and must not be used to publish over the upstream package.
 
 ## Quick Links
 
+- [Changes from upstream FLE](FLE_CHANGES.md)
 - [Installation](#installation)
 - [Environment](#environment)
 - [Contributing](#contributing)
